@@ -63,7 +63,8 @@ slow_mem = DDR4_2400_8x8()
 
 memory = [fast_mem, medium_mem, slow_mem]
 # sizes = ["512MB", "512MB", "512MB"]
-sizes = ["16384MB", "16384MB", "16384MB"]
+# sizes = ["16384MB", "16384MB", "16384MB"]
+sizes = ["3GiB", "3GiB", "3GiB"]
 
 cxl_mem = CXLmemory(memory=memory, sizes=sizes, strategy=strategy)
 # --- Instantiate memory end ---

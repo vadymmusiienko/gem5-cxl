@@ -16,25 +16,23 @@ scons build/ALL/gem5.opt
 """
 
 import argparse
+from socket import (
+    gethostname,
+)  # TODO: Just for the binary path (pcal vs local mac vs hpc)
 
 from gem5.components.boards.simple_board import SimpleBoard
 
-from gem5.components.cachehierarchies.classic.no_cache import NoCache
+# from gem5.components.cachehierarchies.classic.no_cache import NoCache
 from gem5.components.memory import SingleChannelDDR3_1600
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.isas import ISA
 from gem5.simulate.simulator import Simulator
 
-# from gem5.components.cachehierarchies.classic.private_l1_cache_hierarchy import (
-#     PrivateL1CacheHierarchy,
-# )
-# from gem5.components.cachehierarchies.ruby.mesi_three_level_cache_hierarchy import (
-#     MESIThreeLevelCacheHierarchy,
-# )
-# from gem5.components.cachehierarchies.ruby.mesi_two_level_cache_hierarchy import (
-#     MESITwoLevelCacheHierarchy,
-# )
+from gem5.components.cachehierarchies.classic.private_l1_cache_hierarchy import (
+    PrivateL1CacheHierarchy,
+)
+
 from gem5.utils.requires import requires
 
 # Imports for custom workload
@@ -54,6 +52,7 @@ parser.add_argument(
     "--num-threads",
     type=str,
     required=True,
+    default="64",
     # TODO: need better help message
     help="Specify the number of threads 1 - 1000",
 )
@@ -89,18 +88,9 @@ num_operations = args.num_operations
 random_distr = args.random_distr
 
 # TODO: Add cache similar to local machine
-# In this setup we don't have a cache. `NoCache` can be used for such setups.
-cache_hierarchy = NoCache()
-# cache_hierarchy = PrivateL1CacheHierarchy(l1d_size="4KiB", l1i_size="32KiB")
-# cache_hierarchy = MESITwoLevelCacheHierarchy(
-#     l1i_size="32KiB",
-#     l1i_assoc=8,
-#     l1d_size="48KiB",
-#     l1d_assoc=12,
-#     l2_size="1536KiB",
-#     l2_assoc=12,
-#     num_l2_banks=4,
-# )
+# TODO: Cache as an argument?
+# cache_hierarchy = NoCache()
+cache_hierarchy = PrivateL1CacheHierarchy(l1d_size="4KiB", l1i_size="32KiB")
 
 # TODO: Add memory similar to local machine
 # We use a single channel DDR3_1600 memory system
@@ -110,7 +100,9 @@ memory = SingleChannelDDR3_1600(size="4GiB")
 # TODO: Choose a cpu similar to local machine
 # TODO: Number of cores has to be >= number of threads (because no OS)
 # TODO: Try either TIMING or O3
-processor = SimpleProcessor(cpu_type=CPUTypes.O3, isa=ISA.X86, num_cores=24)
+processor = SimpleProcessor(
+    cpu_type=CPUTypes.TIMING, isa=ISA.X86, num_cores=(int(num_threads) + 1)
+)
 
 # TODO: Choose a board similar to local machine
 # The gem5 library simple board which can be used to run SE-mode simulations.
@@ -121,14 +113,20 @@ board = SimpleBoard(
     cache_hierarchy=cache_hierarchy,
 )
 
-# Set the workload
-# TODO: the path is from gem5/src/python/resources
-binary = BinaryResource(
-    local_path="/Users/vadymmusiienko/Work/Research/microtests/bin-intel/microtest"
-)
-arguments = [num_threads, array_size, num_operations, random_distr]
+# TODO: Don't hardcode the workload??
+hostname = gethostname()
+if hostname.startswith("Vadym"):  # 'Vadyms-MacBook-Air-2.local'
+    WORKLOAD_PATH = "/Users/vadymmusiienko/Work/Research/microtests/bin-intel/microtest"
+elif hostname == "pcal03":
+    WORKLOAD_PATH = "/home/vmmv2023/SURP/microtests/bin/microtest"
+elif hostname == "sagehen.hpc.pomona.edu":
+    WORKLOAD_PATH = "/rhome/vmmv2023/SURP/microtests/bin/microtest"
+else:
+    raise Exception("Not one of the configured machines! (pcal|hpc|local mac)")
 
-# workload = SEBinaryWorkload(binary=binary, arguments=arguments)
+# Set the workload
+binary = BinaryResource(local_path=WORKLOAD_PATH)
+arguments = [num_threads, array_size, num_operations, random_distr]
 
 # board.set_se_binary_wordload(workload)
 board.set_se_binary_workload(binary=binary, arguments=arguments)
