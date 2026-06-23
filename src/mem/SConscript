@@ -69,7 +69,7 @@ SimObject('MemDelay.py', sim_objects=['MemDelay', 'SimpleMemDelay'])
 SimObject('PortTerminator.py', sim_objects=['PortTerminator'])
 SimObject('ThreadBridge.py', sim_objects=['ThreadBridge'])
 
-#NOTE: i added this
+# NOTE: i added this
 SimObject('CXLcontroller.py', sim_objects=['CXLcontroller'])
 Source('cxl_controller.cc')
 

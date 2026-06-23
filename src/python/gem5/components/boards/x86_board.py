@@ -140,15 +140,11 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
 
         # Setup memory system specific settings.
         if self.get_cache_hierarchy().is_ruby():
-            self.pc.attachIO(
-                self.get_io_bus(), [self.pc.pci_host.up_request_port()]
-            )
+            self.pc.attachIO(self.get_io_bus(), [self.pc.pci_host.up_request_port()])
         else:
             self.bridge = Bridge(delay="50ns")
             self.bridge.mem_side_port = self.get_io_bus().cpu_side_ports
-            self.bridge.cpu_side_port = (
-                self.get_cache_hierarchy().get_mem_side_port()
-            )
+            self.bridge.cpu_side_port = self.get_cache_hierarchy().get_mem_side_port()
 
             # # Constants similar to x86_traits.hh
             IO_address_space_base = 0x8000000000000000
@@ -158,9 +154,7 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
 
             self.bridge.ranges = [
                 AddrRange(0xC0000000, 0xFFFF0000),
-                AddrRange(
-                    IO_address_space_base, interrupts_address_space_base - 1
-                ),
+                AddrRange(IO_address_space_base, interrupts_address_space_base - 1),
                 AddrRange(pci_config_address_space_base, Addr.max),
             ]
 
@@ -208,9 +202,7 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         self.pc.south_bridge.io_apic.apic_id = io_apic.id
         base_entries.append(io_apic)
         madt_entries.append(
-            X86ACPIMadtIOAPIC(
-                id=io_apic.id, address=io_apic.address, int_base=0
-            )
+            X86ACPIMadtIOAPIC(id=io_apic.id, address=io_apic.address, int_base=0)
         )
 
         pci_bus = X86IntelMPBus(bus_id=0, bus_type="PCI   ")
@@ -279,9 +271,7 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         self.workload.intel_mp_table.base_entries = base_entries
         self.workload.intel_mp_table.ext_entries = ext_entries
 
-        madt = X86ACPIMadt(
-            local_apic_address=0, records=madt_entries, oem_id="madt"
-        )
+        madt = X86ACPIMadt(local_apic_address=0, records=madt_entries, oem_id="madt")
         self.workload.acpi_description_table_pointer.rsdt.entries.append(madt)
         self.workload.acpi_description_table_pointer.xsdt.entries.append(madt)
         self.workload.acpi_description_table_pointer.oem_id = "gem5"
@@ -300,9 +290,21 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
         ]
 
         # Reserve the last 16KiB of the 32-bit address space for m5ops
-        entries.append(
-            X86E820Entry(addr=0xFFFF0000, size="64KiB", range_type=2)
-        )
+        entries.append(X86E820Entry(addr=0xFFFF0000, size="64KiB", range_type=2))
+
+        # TODO: Added this to support more than 3GiB
+        # If memory was split around the I/O hole, the extra high memory
+        # (above 4GiB) lives in mem_ranges[2]. Mark it as available so the
+        # guest OS can use it
+        if len(self.mem_ranges) > 2:
+            high_range = self.mem_ranges[2]
+            entries.append(
+                X86E820Entry(
+                    addr=high_range.start,
+                    size=f"{high_range.size():d}B",
+                    range_type=1,
+                )
+            )
 
         self.workload.e820_table.entries = entries
 
@@ -370,17 +372,16 @@ class X86Board(AbstractSystemBoard, KernelDiskWorkload, SEBinaryWorkload):
     def _setup_memory_ranges(self):
         memory = self.get_memory()
 
-        # TODO: Changed this to allow more than 3GB
+        # TODO:
+        # I modified this to allow more than 3GiB by splitting memory around the I/O hole
+        # Low memory occupies [0, 3GiB), the region [3GiB, 4GiB) is the I/O
+        # hole, and the remaining memory is placed above 4GiB.
         if memory.get_size() > toMemorySize("3GiB"):
-
-            # raise Exception(
-            #     "X86Board currently only supports memory sizes up "
-            #     "to 3GiB because of the I/O hole."
-            # )
-
             data_range1 = AddrRange(toMemorySize("3GiB"))
             remaining_size = memory.get_size() - toMemorySize("3GiB")
-            data_range2 = AddrRange(0xFFFF0000, size=remaining_size)
+            # TODO: Should this be 0x10000000 or 0xFFFF0000
+            # I think 0x1 because 0xFFFF0000 + 64 KiB are resevered for m5ops?
+            data_range2 = AddrRange(0x100000000, size=remaining_size)
 
             memory.set_memory_range([data_range1, data_range2])
 

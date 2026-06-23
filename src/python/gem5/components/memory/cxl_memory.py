@@ -37,7 +37,6 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 # Author: Vadym Musiienko, Pomona College 2026
-from copy import copy
 from typing import (
     List,
     Optional,
@@ -146,50 +145,60 @@ class CXLmemory(AbstractMemorySystem):
     def get_size(self) -> int:
         return sum(self._sizes)
 
-    # Assign addr range to each memory device
-    # ranges has 1 range of size "total_size"
-    # TODO: might have to modify to use 2 ranges (x86-board)
+    # NOTE: The X86Board splits memory around the 3GiB-4GiB I/O hole
+    # Made it work with X86Board of larger sizes than 3GiB
     @overrides(AbstractMemorySystem)
     def set_memory_range(self, ranges: List[AddrRange]) -> None:
+        if len(ranges) < 1:
+            raise Exception("CXL controller requires at least one memory range")
 
-        if len(ranges) == 1 or len(ranges) == 2:
-            # TODO: like we did before
+        # TODO:? The ranges handed to us must exactly match this memory's total size
+        total_range_size = sum(int(r.size()) for r in ranges)
+        if total_range_size != self.get_size():
+            raise Exception(
+                "CXL memory: the address ranges provided by the board "
+                f"({total_range_size} B) do not match this memory's total "
+                f"size ({self.get_size()} B)."
+            )
 
-            # Split the memory addresses
-            start = copy(ranges[0].start)
-            for i in range(len(self._sizes)):
-                self._dram[i].range = AddrRange(start=start, size=self._sizes[i])
-                start += self._sizes[i]
+        # NOTE: Must match BLOCK_SIZE in src/mem/cxl_controller.hh.
+        BLOCK_SIZE = 64
 
-        # elif len(ranges) == 2:
-        #     range_idx = 0
-        #     current_start = copy(ranges[range_idx].start)
-        #     remaining_in_range = ranges[range_idx].size()
-        #
-        #     for i in range(len(self._dram)):
-        #         device_size = self._sizes[i]
-        #
-        #         # Doesn't fit
-        #         if device_size > remaining_in_range and range_idx == 0:
-        #             range_idx += 1
-        #             current_start = copy(ranges[range_idx].start)
-        #             remaining_in_range = ranges[range_idx].size()
-        #
-        #         self._dram[i].range = AddrRange(start=current_start, size=device_size)
-        #         current_start += device_size
-        #         remaining_in_range -= device_size
-        #
-        #     print(f"DRAM ranges: {[((int) copy(dram.range.start), dram.range.end) for dram in self._dram]}")
-        else:
-            raise Exception("CXL controller requires 1 or 2 memory ranges")
+        range_idx = 0
+        cur = int(ranges[range_idx].start)
+        range_end = int(ranges[range_idx].end)
 
-    # Expose CPU-side ports to the board
-    # TODO: Might have to modify for X86 Board with over 3GiB to have 2 ranges
+        for i, size in enumerate(self._sizes):
+            # Skip full ranges
+            while cur >= range_end:
+                range_idx += 1
+                if range_idx >= len(ranges):
+                    raise Exception("CXL memory: ran out of board address ranges")
+                cur = int(ranges[range_idx].start)
+                range_end = int(ranges[range_idx].end)
+
+            # NOTE: Try to fit an entire mem device within the current range
+            # TODO: Not sur if a mem device can be split between 2 ranges
+            if cur + size > range_end:
+                raise Exception(
+                    "The first device/devices must be exactly 3GiB to fit in the first mem range of the X86Board."
+                )
+
+            # Ensure the addresses are block aligned
+            assert cur % BLOCK_SIZE == 0 and size % BLOCK_SIZE == 0
+
+            self._dram[i].range = AddrRange(start=cur, size=size)
+            cur += size
+
+    # Expose the controller's single CPU-side port to the board.
     @overrides(AbstractMemorySystem)
     def get_mem_ports(self) -> Sequence[Tuple[AddrRange, Port]]:
+        start = min(int(dram.range.start) for dram in self._dram)
+        end = max(int(dram.range.end) for dram in self._dram)
+        size = end - start
         return [
             (
-                AddrRange(start=self._dram[0].range.start, size=self.get_size()),
+                AddrRange(start=start, size=size),
                 self.cxl_ctrl.cpu_port,
             )
         ]

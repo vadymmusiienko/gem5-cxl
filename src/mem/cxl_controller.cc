@@ -59,6 +59,27 @@ CXLcontroller::getPort(const std::string &if_name, PortID idx)
     }
 }
 
+// NOTE: This function handles the I/O hole in X86board
+//
+// Returns address map index for the current physical address block
+// Takes into account the I/O holde in X86board, collapses the gap between
+// device ranges such that [0, total_size / BLOCK_SIZE] is enough space
+//
+// If there is no I/O hole, it will just return phys_addr / BLOCK_SIZE
+Addr
+CXLcontroller::physToMapIndex(Addr phys_addr) const
+{
+    Addr taken_space = 0;
+    for (int i = 0; i < device_addr_ranges.size(); i++) {
+        AddrRange range = device_addr_ranges[i];
+        if (range.contains(phys_addr)) {
+            return (taken_space + (phys_addr - range.start())) / BLOCK_SIZE;
+        }
+        taken_space += range.size();
+    }
+    panic("Physical address %#x is not in any device range", phys_addr);
+}
+
 // Copy a packet and update address
 // Also handles alignment
 // !! DOES NOT UPDATE device_next_block !!
@@ -73,7 +94,7 @@ CXLcontroller::remapPacket(PacketPtr pkt, Addr new_addr_block, bool isTiming)
     Addr origAddrAligned = origAddr - offset; // Aligned phys
 
     assert(origAddrAligned % BLOCK_SIZE == 0);
-    Addr addr_map_idx = origAddrAligned / BLOCK_SIZE; // Address map index
+    Addr addr_map_idx = physToMapIndex(origAddrAligned); // addr map array idx
 
     // Phys addr -> Device addr (Block aligned)
     addr_map[addr_map_idx] = new_addr_block;
@@ -141,7 +162,8 @@ CXLcontroller::handleRandom(PacketPtr pkt, bool from_cpu, bool isTiming)
         Addr cpu_addr_aligned = cpu_addr - offset; // Aligned phys
 
         assert(cpu_addr_aligned % BLOCK_SIZE == 0);
-        Addr addr_map_idx = cpu_addr_aligned / BLOCK_SIZE; // Address map index
+        Addr addr_map_idx =
+            physToMapIndex(cpu_addr_aligned); // addr map array idx
 
         // TODO: -1 or should i use 0xFF
         if (addr_map[addr_map_idx] == (Addr)-1) {
@@ -209,7 +231,8 @@ CXLcontroller::handleSpeed(PacketPtr pkt, bool from_cpu, bool isTiming)
         Addr cpu_addr_aligned = cpu_addr - offset; // Aligned phys
 
         assert(cpu_addr_aligned % BLOCK_SIZE == 0);
-        Addr addr_map_idx = cpu_addr_aligned / BLOCK_SIZE; // Address map index
+        Addr addr_map_idx =
+            physToMapIndex(cpu_addr_aligned); // addr map array idx
 
         // TODO: -1 or 0xFF
         if (addr_map[addr_map_idx] == (Addr)-1) {

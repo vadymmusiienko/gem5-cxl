@@ -69,6 +69,10 @@ class CXLcontroller : public SimObject
     PacketPtr remapPacket(PacketPtr pkt, Addr new_addr_block, bool isTiming);
     void updateOldPacket(PacketPtr oldPkt, PacketPtr newPkt);
 
+    // Map a block-aligned physical address to an addr map idx
+    // NOTE: (Collapses I/O gap for x86 board)
+    Addr physToMapIndex(Addr phys_addr) const;
+
     // Address mappings
     // std::unordered_map<Addr, Addr> addr_map; // Phys addr -> Device addr
     Addr *addr_map; // addr_map[phys_addr_idx] = device addr
