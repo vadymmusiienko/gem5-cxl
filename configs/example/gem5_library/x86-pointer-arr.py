@@ -19,6 +19,7 @@ import argparse
 from socket import (
     gethostname,
 )  # TODO: Just for the binary path (pcal vs local mac vs hpc)
+import os
 
 from gem5.components.boards.simple_board import SimpleBoard
 
@@ -119,7 +120,7 @@ if hostname.startswith("Vadym"):  # 'Vadyms-MacBook-Air-2.local'
     WORKLOAD_PATH = "/Users/vadymmusiienko/Work/Research/microtests/bin-intel/microtest"
 elif hostname == "pcal03":
     WORKLOAD_PATH = "/home/vmmv2023/SURP/microtests/bin/microtest"
-elif hostname == "sagehen.hpc.pomona.edu":
+elif "SLURM_JOB_ID" in os.environ or hostname == "sagehen.hpc.pomona.edu":
     WORKLOAD_PATH = "/rhome/vmmv2023/SURP/microtests/bin/microtest"
 else:
     raise Exception("Not one of the configured machines! (pcal|hpc|local mac)")
