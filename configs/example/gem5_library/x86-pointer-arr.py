@@ -23,7 +23,7 @@ import os
 
 from gem5.components.boards.simple_board import SimpleBoard
 
-# from gem5.components.cachehierarchies.classic.no_cache import NoCache
+from gem5.components.cachehierarchies.classic.no_cache import NoCache
 from gem5.components.memory import SingleChannelDDR3_1600
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
@@ -53,7 +53,6 @@ parser.add_argument(
     "--num-threads",
     type=str,
     required=True,
-    default="64",
     # TODO: need better help message
     help="Specify the number of threads 1 - 1000",
 )
@@ -87,11 +86,12 @@ num_threads = args.num_threads
 array_size = args.array_size
 num_operations = args.num_operations
 random_distr = args.random_distr
+NUM_CORES = 65
 
 # TODO: Add cache similar to local machine
 # TODO: Cache as an argument?
-# cache_hierarchy = NoCache()
-cache_hierarchy = PrivateL1CacheHierarchy(l1d_size="4KiB", l1i_size="32KiB")
+cache_hierarchy = NoCache()
+# cache_hierarchy = PrivateL1CacheHierarchy(l1d_size="4KiB", l1i_size="32KiB")
 
 # TODO: Add memory similar to local machine
 # We use a single channel DDR3_1600 memory system
@@ -101,9 +101,7 @@ memory = SingleChannelDDR3_1600(size="4GiB")
 # TODO: Choose a cpu similar to local machine
 # TODO: Number of cores has to be >= number of threads (because no OS)
 # TODO: Try either TIMING or O3
-processor = SimpleProcessor(
-    cpu_type=CPUTypes.TIMING, isa=ISA.X86, num_cores=(int(num_threads) + 1)
-)
+processor = SimpleProcessor(cpu_type=CPUTypes.TIMING, isa=ISA.X86, num_cores=NUM_CORES)
 
 # TODO: Choose a board similar to local machine
 # The gem5 library simple board which can be used to run SE-mode simulations.

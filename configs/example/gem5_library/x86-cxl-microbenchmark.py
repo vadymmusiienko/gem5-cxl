@@ -16,14 +16,12 @@ scons build/ALL/gem5.opt
 """
 
 import argparse
-from socket import gethostname
 import os
+from socket import gethostname
 
 import m5
-
-from m5.util.convert import toMemorySize  # Convert mem sizes to bytes (int)
-from gem5.components.boards.x86_board import X86Board
 from gem5.components.boards.simple_board import SimpleBoard
+from gem5.components.boards.x86_board import X86Board
 from gem5.components.cachehierarchies.classic.no_cache import NoCache
 from gem5.components.memory.cxl_memory import CXLmemory
 
@@ -31,15 +29,13 @@ from gem5.components.memory.cxl_memory import CXLmemory
 from gem5.components.memory.dram_interfaces.ddr3 import DDR3_1600_8x8
 from gem5.components.memory.dram_interfaces.ddr4 import DDR4_2400_8x8
 from gem5.components.memory.dram_interfaces.ddr5 import DDR5_8400_4x8
-
 from gem5.components.processors.cpu_types import CPUTypes
-
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.components.processors.simple_switchable_processor import (  # TODO: processor that supports KVM
     SimpleSwitchableProcessor,
 )
 from gem5.isas import ISA
-from gem5.resources.resource import obtain_resource
+from gem5.resources.resource import BinaryResource, obtain_resource
 from gem5.simulate.exit_handler import (
     WorkBeginExitHandler,
     WorkEndExitHandler,
@@ -47,7 +43,6 @@ from gem5.simulate.exit_handler import (
 from gem5.simulate.simulator import Simulator
 from gem5.utils.override import overrides
 from gem5.utils.requires import requires
-from gem5.resources.resource import BinaryResource
 
 # TODO: Add more memory (fast, medium, slow)
 
@@ -109,6 +104,22 @@ parser.add_argument(
     choices=["u", "z"],
 )
 
+# Direct method fragmentation arguments
+# NOTE: Granularity is a constant (FRAG_GRANULE in src/mem/cxl_controller.hh)
+parser.add_argument(
+    "--frag-perc",
+    type=int,
+    default=0,
+    help="Percentage of memory granules to shuffle (direct strategy only)",
+)
+
+parser.add_argument(
+    "--frag-seed",
+    type=int,
+    default=47,
+    help="Seed for the fragmentation shuffle (direct strategy only)",
+)
+
 args = parser.parse_args()
 
 # NOTE: There are going to be 3 strategies: "direct" | "random" | "speed"
@@ -119,23 +130,17 @@ array_size = args.array_size
 num_operations = args.num_operations
 random_distr = args.random_distr
 
+# Fragmentation only makes sense for the direct strategy
+if strategy != "direct" and args.frag_perc != 0:
+    parser.error("--frag-perc only applies to the 'direct' strategy")
+
 # TODO: Take as arguments?
 sizes = ["1GiB", "1GiB", "1GiB"]
 # sizes = ["512MiB", "512MiB", "512MiB"]
 # sizes = ["3GiB", "16384MB", "16384MB"]
 
-# Direct method fragmentation params
-# TODO: Take as arguments?
-total_size = None
-free_mem_perc = None
-if strategy == "direct":
-    total_size = sum(toMemorySize(size) for size in sizes)
-    free_mem_perc = 80
-
 # Arguments for the binary (pointer array worload)
 arguments = [num_threads, array_size, num_operations, random_distr]
-if (total_size is not None) and (free_mem_perc is not None):
-    arguments.extend([str(total_size), str(free_mem_perc), "--mem-safe"])
 
 # TODO: Custom sizes? + different memories
 # DDR5, DDR4, DDR3
@@ -146,7 +151,13 @@ slow_mem = DDR3_1600_8x8()
 # NOTE: First memory device(s) have to be exactly 3GiB (or total memory <= 3GiB)
 memory = [fast_mem, medium_mem, slow_mem]
 
-cxl_mem = CXLmemory(memory=memory, sizes=sizes, strategy=strategy)
+cxl_mem = CXLmemory(
+    memory=memory,
+    sizes=sizes,
+    strategy=strategy,
+    frag_perc=args.frag_perc,
+    frag_seed=args.frag_seed,
+)
 
 
 # In this setup we don't have a cache. `NoCache` can be used for such setups.

@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdint>
 #include <cstdlib> // rand() function
 #include <deque>
 #include <unordered_map>
@@ -57,25 +58,38 @@ class CXLcontroller : public SimObject
     // -----------------------------------------------------------------
     // Constants (Addr <=> uint64_t)
     static constexpr Addr BLOCK_SIZE = 64;
+    // Granularity of the fragmentation map for "direct"
+    // NOTE: Change here (Try page size? 4KiB?)
+    static constexpr Addr FRAG_GRANULE = 256;
 
     // Config file params
     std::vector<AddrRange> device_addr_ranges;
     std::string cxl_redirect_strategy; // "direct" | "random" | "speed"
+    int frag_perc;      // % of granules to shuffle ("direct" only, 0 = off)
+    uint64_t frag_seed; // Seed for the fragmentation shuffle
 
     // Helper functions for redirection strategies
-    PacketPtr handleDirect(PacketPtr pkt);
+    PacketPtr handleDirect(PacketPtr pkt, bool from_cpu, bool isTiming);
     PacketPtr handleRandom(PacketPtr pkt, bool from_cpu, bool isTiming);
     PacketPtr handleSpeed(PacketPtr pkt, bool from_cpu, bool isTiming);
-    PacketPtr remapPacket(PacketPtr pkt, Addr new_addr_block, bool isTiming);
+    PacketPtr remapPacket(PacketPtr pkt, Addr new_addr, bool isTiming);
     void updateOldPacket(PacketPtr oldPkt, PacketPtr newPkt);
 
-    // Map a block-aligned physical address to an addr map idx
+    // Map a granularity-aligned physical address to an addr map idx
     // NOTE: (Collapses I/O gap for x86 board)
-    Addr physToMapIndex(Addr phys_addr) const;
+    Addr physToMapIndex(Addr phys_addr, Addr granularity) const;
+
+    // Inverse of physToMapIndex (addr map idx -> aligned physical address)
+    Addr mapIndexToPhys(Addr map_idx, Addr granularity) const;
+
+    // Build the fragmentation map for the "direct" strategy
+    void initFragMap(Addr total_size);
 
     // Address mappings
     // std::unordered_map<Addr, Addr> addr_map; // Phys addr -> Device addr
     Addr *addr_map; // addr_map[phys_addr_idx] = device addr
+    // Static fragmentation map for "direct" (granule idx -> device addr)
+    std::vector<Addr> frag_map;
     std::unordered_map<PacketPtr, PacketPtr>
         reverse_addr_map; // Device pkt -> Original pkt
 

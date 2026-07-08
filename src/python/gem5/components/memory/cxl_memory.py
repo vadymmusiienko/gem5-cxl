@@ -44,8 +44,8 @@ from typing import (
     Tuple,
 )
 
-from m5.objects import AbstractMemory
 from m5.objects import (
+    AbstractMemory,
     AddrRange,
     BadAddr,
     BaseXBar,
@@ -95,17 +95,25 @@ class CXLmemory(AbstractMemorySystem):
         sizes: Optional[List[str]] = None,
         membus: Optional[BaseXBar] = None,
         memory: Optional[List[AbstractMemory]] = None,
+        frag_perc: int = 0,
+        frag_seed: int = 47,
     ) -> None:
         """
         :param strategy: One of the 3 strategies: "direct", "random", "speed". Defaults to "direct".
         :param sizes: The sizes of every memory device. Defaults to 1 size of "512MB"
         :param membus: The memory bus. This parameter is optional and will default to a 64 bit width SystemXBar if not specified.
         :param memory: A list of memory interfaces for the cxl memory pool.
+        :param frag_perc: Percentage of granules to shuffle for the "direct" strategy fragmentation. Defaults to 0 (no fragmentation).
+        :param frag_seed: Seed for the fragmentation shuffle. Defaults to 47.
         """
         super().__init__()
 
         # CXL Controller redirect strategy: "direct" | "random" | "speed"
         self._strategy = strategy if strategy else "direct"
+
+        # Fragmentation params ("direct" strategy only)
+        self._frag_perc = frag_perc
+        self._frag_seed = frag_seed
 
         # Memory interfaces
         self.membus = membus if membus else self._get_default_membus()
@@ -139,8 +147,10 @@ class CXLmemory(AbstractMemorySystem):
         # Pass our params to c++ backend
         self.cxl_ctrl.device_ranges = [dram.range for dram in self._dram]
         self.cxl_ctrl.cxl_strategy = self._strategy
+        self.cxl_ctrl.frag_perc = self._frag_perc
+        self.cxl_ctrl.frag_seed = self._frag_seed
 
-    # Total size of the memory (total RAM)
+    # Total size of the memory system (total RAM)
     @overrides(AbstractMemorySystem)
     def get_size(self) -> int:
         return sum(self._sizes)

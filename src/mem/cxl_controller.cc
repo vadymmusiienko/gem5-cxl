@@ -1,6 +1,8 @@
 #include "mem/cxl_controller.hh"
 
+#include <algorithm> // std::shuffle
 #include <cstdint>
+#include <random>
 
 #include "base/addr_range.hh"
 #include "base/logging.hh"
@@ -15,6 +17,8 @@ CXLcontroller::CXLcontroller(const CXLcontrollerParams *params)
       mem_port(params->name + ".mem_port", this),
       device_addr_ranges(params->device_ranges),   // Config param
       cxl_redirect_strategy(params->cxl_strategy), // Config param
+      frag_perc(params->frag_perc),                // Config param
+      frag_seed(params->frag_seed),                // Config param
       // addr_map(),                                  // Phys addr -> Device
       // addr
       reverse_addr_map(),  // Orig pkt -> New pkt
@@ -25,8 +29,8 @@ CXLcontroller::CXLcontroller(const CXLcontrollerParams *params)
     Addr total_size = 0;
     for (int i = 0; i < device_addr_ranges.size(); i++) {
 
-        assert(device_addr_ranges[i].start() % BLOCK_SIZE == 0);
-        assert(device_addr_ranges[i].size() % BLOCK_SIZE == 0);
+        assert(device_addr_ranges[i].start() % FRAG_GRANULE == 0);
+        assert(device_addr_ranges[i].size() % FRAG_GRANULE == 0);
 
         total_size += device_addr_ranges[i].size();
 
@@ -37,10 +41,53 @@ CXLcontroller::CXLcontroller(const CXLcontrollerParams *params)
     // Initialize address map
     if (cxl_redirect_strategy == "direct") {
         addr_map = nullptr;
+        initFragMap(total_size);
     } else {
         size_t num_blocks = total_size / BLOCK_SIZE;
         addr_map = static_cast<Addr *>(malloc(num_blocks * sizeof(Addr)));
         memset(addr_map, 0xFF, num_blocks * sizeof(Addr));
+    }
+}
+
+// Build the fragmentation map for the "direct" strategy
+// Selects a subset of the device addrs granules and shuffles them
+// If frag_perc = 100, then fully shuffled blocks of size FRAG_GRANULE
+void
+CXLcontroller::initFragMap(Addr total_size)
+{
+    assert(frag_perc >= 0 && frag_perc <= 100);
+    assert(FRAG_GRANULE % BLOCK_SIZE == 0);
+
+    // No fragmentation - pure identity mapping, no map needed
+    if (frag_perc == 0) {
+        return;
+    }
+
+    // granule idx -> granule-aligned device addr
+    size_t num_granules = total_size / FRAG_GRANULE;
+    frag_map.resize(num_granules);
+    for (size_t i = 0; i < num_granules; i++) {
+        frag_map[i] = mapIndexToPhys(i, FRAG_GRANULE);
+    }
+
+    // Choose granules to shuffle
+    std::mt19937_64 gen(frag_seed);
+    std::vector<size_t> indices(num_granules); // 0, 1, 2 ...
+    for (size_t i = 0; i < num_granules; i++) {
+        indices[i] = i;
+    }
+    std::shuffle(indices.begin(), indices.end(), gen);
+
+    size_t num_shuffled = num_granules * frag_perc / 100;
+
+    // Shuffle the device addrs of the chosen granules among themselves
+    std::vector<Addr> chosen_addrs(num_shuffled);
+    for (size_t i = 0; i < num_shuffled; i++) {
+        chosen_addrs[i] = frag_map[indices[i]];
+    }
+    std::shuffle(chosen_addrs.begin(), chosen_addrs.end(), gen);
+    for (size_t i = 0; i < num_shuffled; i++) {
+        frag_map[indices[i]] = chosen_addrs[i];
     }
 }
 
@@ -61,53 +108,60 @@ CXLcontroller::getPort(const std::string &if_name, PortID idx)
 
 // NOTE: This function handles the I/O hole in X86board
 //
-// Returns address map index for the current physical address block
+// Returns address map index for the current physical address granule
 // Takes into account the I/O holde in X86board, collapses the gap between
-// device ranges such that [0, total_size / BLOCK_SIZE] is enough space
+// device ranges such that [0, total_size / granularity] is enough space
 //
-// If there is no I/O hole, it will just return phys_addr / BLOCK_SIZE
+// If there is no I/O hole, it will just return phys_addr / granularity
+// NOTE: granularity can be BLOCK_SIZE or FRAG_GRANULE
 Addr
-CXLcontroller::physToMapIndex(Addr phys_addr) const
+CXLcontroller::physToMapIndex(Addr phys_addr, Addr granularity) const
 {
     Addr taken_space = 0;
     for (int i = 0; i < device_addr_ranges.size(); i++) {
         AddrRange range = device_addr_ranges[i];
         if (range.contains(phys_addr)) {
-            return (taken_space + (phys_addr - range.start())) / BLOCK_SIZE;
+            return (taken_space + (phys_addr - range.start())) / granularity;
         }
         taken_space += range.size();
     }
     panic("Physical address %#x is not in any device range", phys_addr);
 }
 
-// Copy a packet and update address
-// Also handles alignment
-// !! DOES NOT UPDATE device_next_block !!
-PacketPtr
-CXLcontroller::remapPacket(PacketPtr pkt, Addr new_addr_block, bool isTiming)
+// Inverse of physToMapIndex
+// Used by direct  method for fragmentation
+// Takes frag_map idx and returns physical addr
+// granularity == FRAG_GRANULE
+Addr
+CXLcontroller::mapIndexToPhys(Addr map_idx, Addr granularity) const
 {
-    // Alignment
-    // Addr new_addr_block (param)            // Aligned device
-    Addr origAddr = pkt->getAddr();           // Non-aligned phys
-    Addr offset = origAddr % BLOCK_SIZE;      // == 0 if already aligned
-    Addr newAddr = new_addr_block + offset;   // Non-aligned device
-    Addr origAddrAligned = origAddr - offset; // Aligned phys
+    Addr addr_offset = map_idx * granularity;
+    for (int i = 0; i < device_addr_ranges.size(); i++) {
+        AddrRange range = device_addr_ranges[i];
 
-    assert(origAddrAligned % BLOCK_SIZE == 0);
-    Addr addr_map_idx = physToMapIndex(origAddrAligned); // addr map array idx
+        // Find the correct device
+        if (addr_offset < range.size()) {
+            return range.start() + addr_offset;
+        }
+        addr_offset -= range.size();
+    }
+    panic("Addr map index %d is not in any device range", map_idx);
+}
 
-    // Phys addr -> Device addr (Block aligned)
-    addr_map[addr_map_idx] = new_addr_block;
-
+// Copy a packet and update its address
+// !! DOES NOT UPDATE device_next_block or the address maps !!
+PacketPtr
+CXLcontroller::remapPacket(PacketPtr pkt, Addr new_addr, bool isTiming)
+{
     // Don't create a new packet for functional and atomic requests
     if (!isTiming) {
-        pkt->setAddr(newAddr);
+        pkt->setAddr(new_addr);
         return pkt;
     }
 
     // Copy the old packet (keep the flags and create new data buffer)
     PacketPtr newPkt = new Packet(pkt, false, true);
-    newPkt->setAddr(newAddr); // Overwrite the address
+    newPkt->setAddr(new_addr); // Overwrite the address
 
     // TODO: THIS WAS ANOTHER BUG (I DIDN'T HAVE THIS)
     // Copy over the data
@@ -116,7 +170,7 @@ CXLcontroller::remapPacket(PacketPtr pkt, Addr new_addr_block, bool isTiming)
     }
 
     // Only add to reverse map if needs response
-    if (pkt->needsResponse() && isTiming) {
+    if (pkt->needsResponse()) {
         reverse_addr_map[newPkt] = pkt; // Device pkt -> Original pkt
     }
 
@@ -141,11 +195,55 @@ CXLcontroller::updateOldPacket(PacketPtr oldPkt, PacketPtr newPkt)
     }
 }
 
-// Takes in a pkt from cpu or memory and returns pkt (unchanged)
-// Doesn't do anything
+// Takes in a pkt from cpu or memory and returns an appropriate packet
+// Remaps through the fragmentation map
+// (if frag_perc == 0 - no fragmentation)
 PacketPtr
-CXLcontroller::handleDirect(PacketPtr pkt)
-{ return pkt; }
+CXLcontroller::handleDirect(PacketPtr pkt, bool from_cpu, bool isTiming)
+{
+    // No fragmentation (No work needed)
+    if (frag_perc == 0) {
+        return pkt;
+    }
+
+    if (from_cpu) {
+        // Received a request packet from cpu side
+
+        // Alignment (granule)
+        Addr cpu_addr = pkt->getAddr();            // Non-aligned phys
+        Addr offset = cpu_addr % FRAG_GRANULE;     // == 0 if already aligned
+        Addr cpu_addr_aligned = cpu_addr - offset; // Aligned phys
+
+        // TODO: Can a packet span two blocks/granules?
+        panic_if(offset + pkt->getSize() > FRAG_GRANULE,
+                 "Packet at %#x (size %d) spans two fragmentation granules",
+                 cpu_addr, pkt->getSize());
+
+        Addr frag_map_idx = physToMapIndex(cpu_addr_aligned, FRAG_GRANULE);
+        Addr device_addr_aligned = frag_map[frag_map_idx];
+
+        // Remap the packet
+        return remapPacket(pkt, device_addr_aligned + offset, isTiming);
+    } else {
+        // Received a response packet from memory side
+
+        // Find the original packet
+        auto got = reverse_addr_map.find(pkt);
+        panic_if(got == reverse_addr_map.end(),
+                 "No original packet for addr 0x%x", pkt->getAddr());
+
+        PacketPtr origPkt = got->second;
+
+        // Copy over the response data
+        updateOldPacket(origPkt, pkt);
+
+        // Clean up
+        reverse_addr_map.erase(got);
+        delete pkt;
+
+        return origPkt;
+    }
+}
 
 // Takes in a pkt from cpu or memory and returns an appropriate packet to be
 // sent further choosing a random device
@@ -163,7 +261,7 @@ CXLcontroller::handleRandom(PacketPtr pkt, bool from_cpu, bool isTiming)
 
         assert(cpu_addr_aligned % BLOCK_SIZE == 0);
         Addr addr_map_idx =
-            physToMapIndex(cpu_addr_aligned); // addr map array idx
+            physToMapIndex(cpu_addr_aligned, BLOCK_SIZE); // addr map array idx
 
         // TODO: -1 or should i use 0xFF
         if (addr_map[addr_map_idx] == (Addr)-1) {
@@ -182,8 +280,11 @@ CXLcontroller::handleRandom(PacketPtr pkt, bool from_cpu, bool isTiming)
                 next_block = device_next_block[device_idx];
             } while (range.end() == next_block);
 
+            // Phys addr -> Device addr (Block aligned)
+            addr_map[addr_map_idx] = next_block;
+
             // Remap the packet
-            PacketPtr newPkt = remapPacket(pkt, next_block, isTiming);
+            PacketPtr newPkt = remapPacket(pkt, next_block + offset, isTiming);
 
             // Update next free block for this device
             device_next_block[device_idx] += BLOCK_SIZE;
@@ -192,7 +293,7 @@ CXLcontroller::handleRandom(PacketPtr pkt, bool from_cpu, bool isTiming)
 
         } else {
             // Already mapped (exists)
-            return remapPacket(pkt, addr_map[addr_map_idx], isTiming);
+            return remapPacket(pkt, addr_map[addr_map_idx] + offset, isTiming);
         }
     } else {
         // Received a response packet from memory side
@@ -232,7 +333,7 @@ CXLcontroller::handleSpeed(PacketPtr pkt, bool from_cpu, bool isTiming)
 
         assert(cpu_addr_aligned % BLOCK_SIZE == 0);
         Addr addr_map_idx =
-            physToMapIndex(cpu_addr_aligned); // addr map array idx
+            physToMapIndex(cpu_addr_aligned, BLOCK_SIZE); // addr map array idx
 
         // TODO: -1 or 0xFF
         if (addr_map[addr_map_idx] == (Addr)-1) {
@@ -244,8 +345,11 @@ CXLcontroller::handleSpeed(PacketPtr pkt, bool from_cpu, bool isTiming)
             Addr next_block = device_next_block[speed_device_idx];
             assert(range.end() != next_block);
 
+            // Phys addr -> Device addr (Block aligned)
+            addr_map[addr_map_idx] = next_block;
+
             // Remap the packet
-            PacketPtr newPkt = remapPacket(pkt, next_block, isTiming);
+            PacketPtr newPkt = remapPacket(pkt, next_block + offset, isTiming);
 
             // Update next free block for this device
             device_next_block[speed_device_idx] += BLOCK_SIZE;
@@ -261,7 +365,7 @@ CXLcontroller::handleSpeed(PacketPtr pkt, bool from_cpu, bool isTiming)
 
         } else {
             // Already mapped (exists)
-            return remapPacket(pkt, addr_map[addr_map_idx], isTiming);
+            return remapPacket(pkt, addr_map[addr_map_idx] + offset, isTiming);
         }
     } else {
         // Received a response packet from memory side
@@ -291,7 +395,7 @@ CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type)
     // Recreate pkt with the right strategy
     PacketPtr newPkt;
     if (cxl_redirect_strategy == "direct") {
-        newPkt = handleDirect(pkt);
+        newPkt = handleDirect(pkt, true, req_type == "timing");
     } else if (cxl_redirect_strategy == "random") {
         newPkt = handleRandom(pkt, true, req_type == "timing");
     } else if (cxl_redirect_strategy == "speed") {
@@ -326,7 +430,7 @@ CXLcontroller::handleResponse(PacketPtr pkt)
 {
     PacketPtr newPkt;
     if (cxl_redirect_strategy == "direct") {
-        newPkt = handleDirect(pkt);
+        newPkt = handleDirect(pkt, false, false);
     } else if (cxl_redirect_strategy == "random") {
         newPkt = handleRandom(pkt, false, false);
     } else if (cxl_redirect_strategy == "speed") {
