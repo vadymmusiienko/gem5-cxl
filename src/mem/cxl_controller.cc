@@ -15,20 +15,19 @@ CXLcontroller::CXLcontroller(const CXLcontrollerParams *params)
     : SimObject(*params),
       cpu_port(params->name + ".cpu_port", this),
       mem_port(params->name + ".mem_port", this),
-      device_addr_ranges(params->device_ranges),   // Config param
-      cxl_redirect_strategy(params->cxl_strategy), // Config param
-      frag_perc(params->frag_perc),                // Config param
-      frag_seed(params->frag_seed),                // Config param
-      // addr_map(),                                  // Phys addr -> Device
-      // addr
+      device_addr_ranges(params->device_ranges),
+      cxl_redirect_strategy(params->cxl_strategy),
+      frag_perc(params->frag_perc),
+      frag_seed(params->frag_seed),
       reverse_addr_map(),  // Orig pkt -> New pkt
       device_next_block(), // Next free block of every device
-      speed_device_idx(0)  // The index of the fastest device
+      speed_device_idx(0)  // The index of the fastest device (0 by default)
 {
     // Initialize next block of each device to the start of its range
     Addr total_size = 0;
     for (int i = 0; i < device_addr_ranges.size(); i++) {
 
+        // Sanity check (Ensure valid fragmentation granularity)
         assert(device_addr_ranges[i].start() % FRAG_GRANULE == 0);
         assert(device_addr_ranges[i].size() % FRAG_GRANULE == 0);
 
@@ -55,10 +54,12 @@ CXLcontroller::CXLcontroller(const CXLcontrollerParams *params)
 void
 CXLcontroller::initFragMap(Addr total_size)
 {
+    // Sanity check
     assert(frag_perc >= 0 && frag_perc <= 100);
     assert(FRAG_GRANULE % BLOCK_SIZE == 0);
 
-    // No fragmentation - pure identity mapping, no map needed
+    // No fragmentation - no map needed
+    // NOTE: if FRAG_GRANULE == total_size, then also no frag technically
     if (frag_perc == 0) {
         return;
     }

@@ -16,9 +16,7 @@ scons build/ALL/gem5.opt
 """
 
 import argparse
-import base64
 import os
-import textwrap
 from socket import gethostname
 
 import m5
@@ -37,14 +35,7 @@ from gem5.components.processors.simple_switchable_processor import (  # TODO: pr
     SimpleSwitchableProcessor,
 )
 from gem5.isas import ISA
-
-# from gem5.resources.resource import BinaryResource, obtain_resource
-from gem5.resources.resource import (
-    BinaryResource,
-    DiskImageResource,
-    KernelResource,
-    obtain_resource,
-)
+from gem5.resources.resource import BinaryResource, obtain_resource
 from gem5.simulate.exit_handler import (
     WorkBeginExitHandler,
     WorkEndExitHandler,
@@ -63,7 +54,7 @@ requires(isa_required=ISA.X86)
 
 # Arguments
 parser = argparse.ArgumentParser(
-    description="Configuration script to run the pointer array microbenchmark on CXL memory system"
+    description="Configuration script to run skiplist microbenchmark on CXL memory system"
 )
 
 # CXL redirection strategy argument
@@ -91,26 +82,28 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "--array-size",
+    "--initial-size",
     type=str,
     required=True,
+    default="256",
     # TODO: need better help message
-    help="Specify the array size 1 - 1_000_000",
+    help="Specify the inital skiplist size 1 - 1_000_000",
 )
 
 parser.add_argument(
-    "--num-operations",
+    "--range",
     type=str,
     required=True,
+    default="2048",
     # TODO: need better help message
-    help="Specify the number of operations per thread 1 - 1_000_000",
+    help="Specify the range of set keys (keyspace)",
 )
 parser.add_argument(
-    "--random-distr",
+    "--duration",
     type=str,
     required=True,
-    help="Specify random distribution ('u' for uniform or 'z' for  zipf)",
-    choices=["u", "z"],
+    default="10000",
+    help="Specify duration",
 )
 
 # Direct method fragmentation arguments
@@ -135,9 +128,9 @@ args = parser.parse_args()
 strategy = args.strategy
 FS_MODE = args.full_system
 num_threads = args.num_threads
-array_size = args.array_size
-num_operations = args.num_operations
-random_distr = args.random_distr
+initial_size = args.initial_size
+keyspace_range = args.range
+duration = args.duration
 
 # Fragmentation only makes sense for the direct strategy
 if strategy != "direct" and args.frag_perc != 0:
@@ -148,8 +141,18 @@ sizes = ["1GiB", "1GiB", "1GiB"]
 # sizes = ["512MiB", "512MiB", "512MiB"]
 # sizes = ["3GiB", "16384MB", "16384MB"]
 
-# Arguments for the binary (pointer array worload)
-arguments = [num_threads, array_size, num_operations, random_distr]
+# Arguments for the binary (skiplist)
+arguments = [
+    "-d",
+    duration,
+    "-t",
+    num_threads,
+    # "-u", update_perc,
+    "-i",
+    initial_size,
+    "-r",
+    keyspace_range,
+]
 
 # TODO: Custom sizes? + different memories
 # DDR5, DDR4, DDR3
@@ -173,21 +176,11 @@ cxl_mem = CXLmemory(
 # TODO: Make cache hierarchy an argument?
 cache_hierarchy = NoCache()
 
-# Set the workload
-# Actual binary for SE, binary to copy over for FS
-hostname = gethostname()
-if hostname.startswith("Vadym"):  # 'Vadyms-MacBook-Air-2.local'
-    WORKLOAD_PATH = "/Users/vadymmusiienko/Work/Research/microtests/bin-intel/microtest"
-elif hostname == "pcal03":
-    WORKLOAD_PATH = "/home/vmmv2023/SURP/microtests/bin/microtest"
-elif "SLURM_JOB_ID" in os.environ or hostname == "sagehen.hpc.pomona.edu":
-    WORKLOAD_PATH = "/rhome/vmmv2023/SURP/microtests/bin/microtest"
-else:
-    raise Exception("Not one of the configured machines! (pcal|hpc|local mac)")
-
 # Full system mode setup
 if FS_MODE:
-    # Switchable Processor to run FS mode
+    # TODO: processor that supports KVM
+    # TODO: can change KVM to ATOMIC
+    # Switchable Processor to run FS mode3
     processor = SimpleSwitchableProcessor(
         starting_core_type=CPUTypes.ATOMIC,
         switch_core_type=CPUTypes.TIMING,
@@ -203,60 +196,36 @@ if FS_MODE:
         cache_hierarchy=cache_hierarchy,
     )
 
-    # Variable with the entire benchmark binary
-    raw_binary = None
-    with open(WORKLOAD_PATH, "rb") as file:
-        raw_binary = file.read()
-    if not raw_binary:
-        print("Couldn't read the binary file into a variable")
-        exit()
-
-    # Text-safe encoding so the bytes survive the shell script channel
-    payload = base64.b64encode(raw_binary).decode("ascii")
-
-    # Commands to run after boot
-    # Copy over the binary (dynamically updates it) and run it
-    # TODO: try without wrap
-    my_commands = (
-        "echo 'Boot complete, updating the binary!'\n"
-        "cat << 'B64EOF' | base64 -d > /root/executable\n"
-        f"{payload}\n"
-        "B64EOF\n"
-        "chmod +x /root/executable\n"
-        f"/root/executable {' '.join(arguments)}\n"
-        "m5 exit\n"
-    )
-
-    board.set_kernel_disk_workload(
-        kernel=obtain_resource(resource_id="x86-linux-kernel-5.4.49"),
-        disk_image=obtain_resource(resource_id="x86-ubuntu-18.04-img"),
-        readfile_contents=my_commands,  # Bash script that runs after boot
-    )
-
-    print("Full-System mode")
-
-    # Custom messages
-    class CustomWorkBeginExitHandler(WorkBeginExitHandler):
-        @overrides(WorkBeginExitHandler)
-        def _process(self, simulator: "Simulator") -> None:
-            print("Done booting Linux")
-            print("Resetting stats at the start of ROI!")
-            m5.stats.reset()
-            simulator.switch_processor()
-
-        @overrides(WorkBeginExitHandler)
-        def _exit_simulation(self) -> bool:
-            return False
-
-    class CustomWorkEndExitHandler(WorkEndExitHandler):
-        @overrides(WorkEndExitHandler)
-        def _process(self, simulator: "Simulator") -> None:
-            print("Dump stats at the end of the ROI!")
-            m5.stats.dump()
-
-        @overrides(WorkEndExitHandler)
-        def _exit_simulation(self) -> bool:
-            return True
+    # # FS mode workdload setting
+    # # TODO: Change workload to my disk image
+    # board.set_workload(
+    #     obtain_resource(
+    #         f"x86-ubuntu-24.04-gapbs-{args.benchmark}-test",
+    #         resource_version="1.0.0",
+    #     )
+    # )
+    #
+    # class CustomWorkBeginExitHandler(WorkBeginExitHandler):
+    #     @overrides(WorkBeginExitHandler)
+    #     def _process(self, simulator: "Simulator") -> None:
+    #         print("Done booting Linux")
+    #         print("Resetting stats at the start of ROI!")
+    #         m5.stats.reset()
+    #         simulator.switch_processor()
+    #
+    #     @overrides(WorkBeginExitHandler)
+    #     def _exit_simulation(self) -> bool:
+    #         return False
+    #
+    # class CustomWorkEndExitHandler(WorkEndExitHandler):
+    #     @overrides(WorkEndExitHandler)
+    #     def _process(self, simulator: "Simulator") -> None:
+    #         print("Dump stats at the end of the ROI!")
+    #         m5.stats.dump()
+    #
+    #     @overrides(WorkEndExitHandler)
+    #     def _exit_simulation(self) -> bool:
+    #         return True
 
 else:
     # SE mode setup
@@ -271,10 +240,20 @@ else:
         cache_hierarchy=cache_hierarchy,
     )
 
+    # Set the workload
+    # TODO: Don't hardcode the workload??
+    hostname = gethostname()
+    if hostname.startswith("Vadym"):  # 'Vadyms-MacBook-Air-2.local'
+        WORKLOAD_PATH = "/Users/vadymmusiienko/Work/Research/microtests/bin-intel/lockfree-fraser-skiplist"
+    elif hostname == "pcal03":
+        WORKLOAD_PATH = "/home/vmmv2023/SURP/microtests/bin/lockfree-fraser-skiplist"
+    elif "SLURM_JOB_ID" in os.environ or hostname == "sagehen.hpc.pomona.edu":
+        WORKLOAD_PATH = "/rhome/vmmv2023/SURP/microtests/bin/lockfree-fraser-skiplist"
+    else:
+        raise Exception("Not one of the configured machines! (pcal|hpc|local mac)")
+
     binary = BinaryResource(local_path=WORKLOAD_PATH)
     board.set_se_binary_workload(binary=binary, arguments=arguments)
-
-    print("System-call Emulation mode")
 
 
 # Lastly we run the simulation.
