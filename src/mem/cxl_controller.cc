@@ -11,14 +11,19 @@
 namespace gem5
 {
 
-CXLcontroller::CXLcontroller(const CXLcontrollerParams *params)
-    : SimObject(*params),
-      cpu_port(params->name + ".cpu_port", this),
-      mem_port(params->name + ".mem_port", this),
-      device_addr_ranges(params->device_ranges),
-      cxl_redirect_strategy(params->cxl_strategy),
-      frag_perc(params->frag_perc),
-      frag_seed(params->frag_seed),
+CXLcontroller::CXLcontroller(const CXLcontrollerParams &params)
+    : SimObject(params),
+      cpu_port(params.name + ".cpu_port", this),
+      mem_port(params.name + ".mem_port", this),
+      device_addr_ranges(params.device_ranges),
+      cxl_redirect_strategy(params.cxl_strategy),
+      frag_perc(params.frag_perc),
+      frag_seed(params.frag_seed),
+      latency(params.cxl_latency),
+      req_waiting_retry(false),
+      resp_waiting_retry(false),
+      send_req_event([this] { trySendReq(); }, name() + ".sendReqEvent"),
+      send_resp_event([this] { trySendResp(); }, name() + ".sendRespEvent"),
       reverse_addr_map(),  // Orig pkt -> New pkt
       device_next_block(), // Next free block of every device
       speed_device_idx(0)  // The index of the fastest device (0 by default)
@@ -389,8 +394,51 @@ CXLcontroller::handleSpeed(PacketPtr pkt, bool from_cpu, bool isTiming)
     }
 }
 
+// Send the front packet of req_queue to memory
+void
+CXLcontroller::trySendReq()
+{
+    assert(!req_queue.empty());
+
+    PacketPtr pkt = req_queue.front().second;
+    if (!mem_port.sendTimingReq(pkt)) {
+        // Busy, recvReqRetry will be called
+        req_waiting_retry = true;
+        return;
+    }
+    req_waiting_retry = false;
+    req_queue.pop_front();
+
+    // Schedule the next packet
+    // Might be past its ready tick (if was blocked)
+    if (!req_queue.empty()) {
+        schedule(send_req_event, std::max(curTick(), req_queue.front().first));
+    }
+}
+
+// Send the front packet of res_queue to cpu
+void
+CXLcontroller::trySendResp()
+{
+    assert(!resp_queue.empty());
+
+    PacketPtr pkt = resp_queue.front().second;
+    if (!cpu_port.sendTimingResp(pkt)) {
+        // Busy, recvRespRetry will be called
+        resp_waiting_retry = true;
+        return;
+    }
+    resp_waiting_retry = false;
+    resp_queue.pop_front();
+
+    if (!resp_queue.empty()) {
+        schedule(send_resp_event,
+                 std::max(curTick(), resp_queue.front().first));
+    }
+}
+
 // req_type: "timing" | "functional" | "atomic"
-bool
+Tick
 CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type)
 {
     // Recreate pkt with the right strategy
@@ -408,22 +456,27 @@ CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type)
 
     // Handle different request types
     if (req_type == "functional") {
+        // Functional accesses are for setting memory, thus no latency
         mem_port.sendFunctional(newPkt);
+        return 0;
     } else if (req_type == "atomic") {
-        mem_port.sendAtomic(newPkt);
+        // No events, so return just the added latency?
+        return mem_port.sendAtomic(newPkt) + 2 * latency;
     } else if (req_type == "timing") {
 
-        // Forward pkt to memory pool
-        if (!mem_port.sendTimingReq(newPkt)) {
-            mem_port.blocked_packets.push_back(newPkt);
+        // Queue the pkt
+        // It will leave the controller at the "ready" tick
+        Tick ready_at = curTick() + latency;
+        req_queue.emplace_back(ready_at, newPkt);
+        if (!send_req_event.scheduled() && !req_waiting_retry) {
+            schedule(send_req_event, ready_at);
         }
+        return 0;
 
     } else {
         panic("Incorrect request type. Valid types are: 'timing' | "
               "'functional' | 'atomic' ");
     }
-
-    return true;
 }
 
 bool
@@ -441,9 +494,12 @@ CXLcontroller::handleResponse(PacketPtr pkt)
               "'random' | 'speed'");
     }
 
-    // Forward pkt to cpu
-    if (!cpu_port.sendTimingResp(newPkt)) {
-        cpu_port.blocked_packets.push_back(newPkt);
+    // Queue the pkt for the cpu; it may leave the controller once the
+    // latency has elapsed
+    Tick ready_at = curTick() + latency;
+    resp_queue.emplace_back(ready_at, newPkt);
+    if (!send_resp_event.scheduled() && !resp_waiting_retry) {
+        schedule(send_resp_event, ready_at);
     }
     return true;
 }
@@ -459,34 +515,25 @@ CXLcontroller::CpuSidePort::getAddrRanges() const
 
 void
 CXLcontroller::CpuSidePort::recvFunctional(PacketPtr pkt)
-{ assert(owner->handleRequest(pkt, "functional")); }
+{ owner->handleRequest(pkt, "functional"); }
 
 Tick
 CXLcontroller::CpuSidePort::recvAtomic(PacketPtr pkt)
-{
-    assert(owner->handleRequest(pkt, "atomic"));
-    // TODO: For now just returns 0 instead of an actual Tick
-    return 0;
-}
+{ return owner->handleRequest(pkt, "atomic"); }
 
 bool
 CXLcontroller::CpuSidePort::recvTimingReq(PacketPtr pkt)
 {
-    return owner->handleRequest(pkt, "timing"); // Always returns true
+    owner->handleRequest(pkt, "timing");
+    return true; // Never blocks (unbounded queue)
 }
 
 void
 CXLcontroller::CpuSidePort::recvRespRetry()
 {
-    panic_if(blocked_packets.empty(),
-             "Should never receive retry if doesn't have blocked packets");
-
-    PacketPtr pkt = blocked_packets.front();
-
-    // Forward to CPU
-    if (sendTimingResp(pkt)) {
-        blocked_packets.pop_front();
-    }
+    panic_if(!owner->resp_waiting_retry,
+             "Should never receive retry without a blocked packet");
+    owner->trySendResp();
 }
 
 ///// MemSidePort /////
@@ -500,15 +547,9 @@ CXLcontroller::MemSidePort::recvTimingResp(PacketPtr pkt)
 void
 CXLcontroller::MemSidePort::recvReqRetry()
 {
-    panic_if(blocked_packets.empty(),
-             "Should never receive retry if doesn't have blocked packets");
-
-    PacketPtr pkt = blocked_packets.front();
-
-    // Forward to Memory
-    if (sendTimingReq(pkt)) {
-        blocked_packets.pop_front();
-    }
+    panic_if(!owner->req_waiting_retry,
+             "Should never receive retry without a blocked packet");
+    owner->trySendReq();
 }
 
 void
@@ -516,7 +557,3 @@ CXLcontroller::MemSidePort::recvRangeChange()
 { owner->cpu_port.sendRangeChange(); }
 
 }; // namespace gem5
-
-gem5::CXLcontroller *
-gem5::CXLcontrollerParams::create() const
-{ return new gem5::CXLcontroller(this); }

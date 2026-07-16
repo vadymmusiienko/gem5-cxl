@@ -18,6 +18,12 @@ class CXLcontroller(SimObject):
         "CXL Controller redirect strategy: 'direct' | 'random' | 'speed' ",
     )
 
+    # CXL controller latency (for both req and res)
+    # TODO: make req and res latency separate?
+    cxl_latency = Param.Latency(
+        "CXL controller latency (req and res latency is the same)"
+    )
+
     # Fragmentation params ('direct' strategy only)
     frag_perc = Param.Int(0, "Percentage of granules to shuffle (0 = no fragmentation)")
     frag_seed = Param.UInt64(47, "Seed for the fragmentation shuffle")

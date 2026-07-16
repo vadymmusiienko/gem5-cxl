@@ -97,6 +97,8 @@ class CXLmemory(AbstractMemorySystem):
         memory: Optional[List[AbstractMemory]] = None,
         frag_perc: int = 0,
         frag_seed: int = 47,
+        # TODO: This number is in nanoseconds (Change the default?)
+        cxl_latency: int = 25,
     ) -> None:
         """
         :param strategy: One of the 3 strategies: "direct", "random", "speed". Defaults to "direct".
@@ -105,6 +107,7 @@ class CXLmemory(AbstractMemorySystem):
         :param memory: A list of memory interfaces for the cxl memory pool.
         :param frag_perc: Percentage of granules to shuffle for the "direct" strategy fragmentation. Defaults to 0 (no fragmentation).
         :param frag_seed: Seed for the fragmentation shuffle. Defaults to 47.
+        :param cxl_latency: Latency of the cxl controller in nanoseconds
         """
         super().__init__()
 
@@ -114,6 +117,7 @@ class CXLmemory(AbstractMemorySystem):
         # Fragmentation params ("direct" strategy only)
         self._frag_perc = frag_perc
         self._frag_seed = frag_seed
+        self._cxl_latency = f"{cxl_latency}ns"  # Convert int to str with nanosec
 
         # Memory interfaces
         self.membus = membus if membus else self._get_default_membus()
@@ -149,6 +153,7 @@ class CXLmemory(AbstractMemorySystem):
         self.cxl_ctrl.cxl_strategy = self._strategy
         self.cxl_ctrl.frag_perc = self._frag_perc
         self.cxl_ctrl.frag_seed = self._frag_seed
+        self.cxl_ctrl.cxl_latency = self._cxl_latency
 
     # Total size of the memory system (total RAM)
     @overrides(AbstractMemorySystem)
