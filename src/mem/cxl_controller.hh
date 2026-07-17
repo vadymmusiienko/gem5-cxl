@@ -68,8 +68,8 @@ class CXLcontroller : public SimObject
     int frag_perc;      // % of granules to shuffle ("direct" only, 0 = off)
     uint64_t frag_seed; // Seed for the fragmentation shuffle
 
-    // CXL controller latency, applied once per direction
-    // (read round trip = 2 * latency)
+    // CXL controller round-trip latency
+    // (half is applied per direction: latency / 2)
     const Tick latency;
 
     // Timing packets to be sent -- needed for latency (event scheduling)

@@ -18,10 +18,10 @@ class CXLcontroller(SimObject):
         "CXL Controller redirect strategy: 'direct' | 'random' | 'speed' ",
     )
 
-    # CXL controller latency (for both req and res)
+    # CXL controller round-trip latency (half applied per direction)
     # TODO: make req and res latency separate?
     cxl_latency = Param.Latency(
-        "CXL controller latency (req and res latency is the same)"
+        "CXL controller round-trip latency (half applied in each direction)"
     )
 
     # Fragmentation params ('direct' strategy only)

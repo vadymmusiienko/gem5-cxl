@@ -106,7 +106,7 @@ class CXLmemory(AbstractMemorySystem):
         :param memory: A list of memory interfaces for the cxl memory pool.
         :param frag_perc: Percentage of granules to shuffle for the "direct" strategy fragmentation. Defaults to 0 (no fragmentation).
         :param frag_seed: Seed for the fragmentation shuffle. Defaults to 47.
-        :param cxl_latency: Latency of the cxl controller in nanoseconds
+        :param cxl_latency: Round-trip latency of the cxl controller in nanoseconds
         """
         super().__init__()
 

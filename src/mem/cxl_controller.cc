@@ -460,13 +460,14 @@ CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type)
         mem_port.sendFunctional(newPkt);
         return 0;
     } else if (req_type == "atomic") {
-        // No events, so return just the added latency?
-        return mem_port.sendAtomic(newPkt) + 2 * latency;
+        // No events, so return just the added round-trip latency?
+        return mem_port.sendAtomic(newPkt) + latency;
     } else if (req_type == "timing") {
 
         // Queue the pkt
         // It will leave the controller at the "ready" tick
-        Tick ready_at = curTick() + latency;
+        // (one direction = half the round-trip latency)
+        Tick ready_at = curTick() + latency / 2;
         req_queue.emplace_back(ready_at, newPkt);
         if (!send_req_event.scheduled() && !req_waiting_retry) {
             schedule(send_req_event, ready_at);
@@ -495,8 +496,8 @@ CXLcontroller::handleResponse(PacketPtr pkt)
     }
 
     // Queue the pkt for the cpu; it may leave the controller once the
-    // latency has elapsed
-    Tick ready_at = curTick() + latency;
+    // latency has elapsed (one direction = half the round-trip latency)
+    Tick ready_at = curTick() + latency / 2;
     resp_queue.emplace_back(ready_at, newPkt);
     if (!send_resp_event.scheduled() && !resp_waiting_retry) {
         schedule(send_resp_event, ready_at);
