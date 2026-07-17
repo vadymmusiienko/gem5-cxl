@@ -113,14 +113,15 @@ parser.add_argument(
     choices=["u", "z"],
 )
 
-# CXL controller latency (1 way)
+# CXL controller latency
+# TODO: Change to be roundtrip (and specify here)
 parser.add_argument(
     "--latency",
     type=int,
     default=25,
     required=True,
     # TODO: need better help message
-    help="Specify cxl controller latency in nanoseconds (total latency = 2*latency)",
+    help="Specify cxl controller latency in nanoseconds",
 )
 
 # Direct method fragmentation arguments

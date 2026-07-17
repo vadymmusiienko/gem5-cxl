@@ -106,6 +106,17 @@ parser.add_argument(
     help="Specify duration",
 )
 
+# CXL controller latency
+# TODO: Change to be roundtrip (and specify here)
+parser.add_argument(
+    "--latency",
+    type=int,
+    default=25,
+    required=True,
+    # TODO: need better help message
+    help="Specify cxl controller latency in nanoseconds",
+)
+
 # Direct method fragmentation arguments
 # NOTE: Granularity is a constant (FRAG_GRANULE in src/mem/cxl_controller.hh)
 parser.add_argument(
@@ -169,6 +180,7 @@ cxl_mem = CXLmemory(
     strategy=strategy,
     frag_perc=args.frag_perc,
     frag_seed=args.frag_seed,
+    cxl_latency=args.latency,
 )
 
 
