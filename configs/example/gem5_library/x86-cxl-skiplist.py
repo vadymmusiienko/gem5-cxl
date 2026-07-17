@@ -16,6 +16,7 @@ scons build/ALL/gem5.opt
 """
 
 import argparse
+import base64
 import os
 from socket import gethostname
 
@@ -35,7 +36,10 @@ from gem5.components.processors.simple_switchable_processor import (  # TODO: pr
     SimpleSwitchableProcessor,
 )
 from gem5.isas import ISA
-from gem5.resources.resource import BinaryResource, obtain_resource
+from gem5.resources.resource import (
+    BinaryResource,
+    obtain_resource,
+)
 from gem5.simulate.exit_handler import (
     WorkBeginExitHandler,
     WorkEndExitHandler,
@@ -186,6 +190,18 @@ cxl_mem = CXLmemory(
 # TODO: Make cache hierarchy an argument?
 cache_hierarchy = NoCache()
 
+# Set the workload
+# Actual binary for SE, binary to copy over for FS
+hostname = gethostname()
+if hostname.startswith("Vadym"):  # 'Vadyms-MacBook-Air-2.local'
+    WORKLOAD_PATH = "/Users/vadymmusiienko/Work/Research/microtests/bin-intel/lockfree-fraser-skiplist"
+elif hostname == "pcal03":
+    WORKLOAD_PATH = "/home/vmmv2023/SURP/microtests/bin/lockfree-fraser-skiplist"
+elif "SLURM_JOB_ID" in os.environ or hostname == "sagehen.hpc.pomona.edu":
+    WORKLOAD_PATH = "/rhome/vmmv2023/SURP/microtests/bin/lockfree-fraser-skiplist"
+else:
+    raise Exception("Not one of the configured machines! (pcal|hpc|local mac)")
+
 # Full system mode setup
 if FS_MODE:
     # TODO: processor that supports KVM
@@ -206,36 +222,60 @@ if FS_MODE:
         cache_hierarchy=cache_hierarchy,
     )
 
-    # # FS mode workdload setting
-    # # TODO: Change workload to my disk image
-    # board.set_workload(
-    #     obtain_resource(
-    #         f"x86-ubuntu-24.04-gapbs-{args.benchmark}-test",
-    #         resource_version="1.0.0",
-    #     )
-    # )
-    #
-    # class CustomWorkBeginExitHandler(WorkBeginExitHandler):
-    #     @overrides(WorkBeginExitHandler)
-    #     def _process(self, simulator: "Simulator") -> None:
-    #         print("Done booting Linux")
-    #         print("Resetting stats at the start of ROI!")
-    #         m5.stats.reset()
-    #         simulator.switch_processor()
-    #
-    #     @overrides(WorkBeginExitHandler)
-    #     def _exit_simulation(self) -> bool:
-    #         return False
-    #
-    # class CustomWorkEndExitHandler(WorkEndExitHandler):
-    #     @overrides(WorkEndExitHandler)
-    #     def _process(self, simulator: "Simulator") -> None:
-    #         print("Dump stats at the end of the ROI!")
-    #         m5.stats.dump()
-    #
-    #     @overrides(WorkEndExitHandler)
-    #     def _exit_simulation(self) -> bool:
-    #         return True
+    # Variable with the entire benchmark binary
+    raw_binary = None
+    with open(WORKLOAD_PATH, "rb") as file:
+        raw_binary = file.read()
+    if not raw_binary:
+        print("Couldn't read the binary file into a variable")
+        exit()
+
+    # Encoding for shell script
+    payload = base64.b64encode(raw_binary).decode("ascii")
+
+    # Commands to run after boot
+    # Copy over the binary (dynamically updates it) and run it
+    # TODO: try without wrap
+    my_commands = (
+        "echo 'Boot complete, updating the binary!'\n"
+        "cat << 'B64EOF' | base64 -d > /root/executable\n"
+        f"{payload}\n"
+        "B64EOF\n"
+        "chmod +x /root/executable\n"
+        f"/root/executable {' '.join(arguments)}\n"
+        "m5 exit\n"
+    )
+
+    board.set_kernel_disk_workload(
+        kernel=obtain_resource(resource_id="x86-linux-kernel-5.4.49"),
+        disk_image=obtain_resource(resource_id="x86-ubuntu-18.04-img"),
+        readfile_contents=my_commands,  # Bash script that runs after boot
+    )
+
+    print("Full-System mode")
+
+    # Custom messages
+    class CustomWorkBeginExitHandler(WorkBeginExitHandler):
+        @overrides(WorkBeginExitHandler)
+        def _process(self, simulator: "Simulator") -> None:
+            print("Done booting Linux")
+            print("Resetting stats at the start of ROI!")
+            m5.stats.reset()
+            simulator.switch_processor()
+
+        @overrides(WorkBeginExitHandler)
+        def _exit_simulation(self) -> bool:
+            return False
+
+    class CustomWorkEndExitHandler(WorkEndExitHandler):
+        @overrides(WorkEndExitHandler)
+        def _process(self, simulator: "Simulator") -> None:
+            print("Dump stats at the end of the ROI!")
+            m5.stats.dump()
+
+        @overrides(WorkEndExitHandler)
+        def _exit_simulation(self) -> bool:
+            return True
 
 else:
     # SE mode setup
@@ -250,20 +290,10 @@ else:
         cache_hierarchy=cache_hierarchy,
     )
 
-    # Set the workload
-    # TODO: Don't hardcode the workload??
-    hostname = gethostname()
-    if hostname.startswith("Vadym"):  # 'Vadyms-MacBook-Air-2.local'
-        WORKLOAD_PATH = "/Users/vadymmusiienko/Work/Research/microtests/bin-intel/lockfree-fraser-skiplist"
-    elif hostname == "pcal03":
-        WORKLOAD_PATH = "/home/vmmv2023/SURP/microtests/bin/lockfree-fraser-skiplist"
-    elif "SLURM_JOB_ID" in os.environ or hostname == "sagehen.hpc.pomona.edu":
-        WORKLOAD_PATH = "/rhome/vmmv2023/SURP/microtests/bin/lockfree-fraser-skiplist"
-    else:
-        raise Exception("Not one of the configured machines! (pcal|hpc|local mac)")
-
     binary = BinaryResource(local_path=WORKLOAD_PATH)
     board.set_se_binary_workload(binary=binary, arguments=arguments)
+
+    print("System-call Emulation mode")
 
 
 # Lastly we run the simulation.

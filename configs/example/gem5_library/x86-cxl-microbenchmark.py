@@ -18,7 +18,6 @@ scons build/ALL/gem5.opt
 import argparse
 import base64
 import os
-import textwrap
 from socket import gethostname
 
 import m5
@@ -41,8 +40,6 @@ from gem5.isas import ISA
 # from gem5.resources.resource import BinaryResource, obtain_resource
 from gem5.resources.resource import (
     BinaryResource,
-    DiskImageResource,
-    KernelResource,
     obtain_resource,
 )
 from gem5.simulate.exit_handler import (
@@ -221,7 +218,7 @@ if FS_MODE:
         print("Couldn't read the binary file into a variable")
         exit()
 
-    # Text-safe encoding so the bytes survive the shell script channel
+    # Encoding for shell script
     payload = base64.b64encode(raw_binary).decode("ascii")
 
     # Commands to run after boot
