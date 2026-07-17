@@ -90,7 +90,6 @@ class CXLmemory(AbstractMemorySystem):
 
     def __init__(
         self,
-        # latency: int
         strategy: Optional[str] = None,
         sizes: Optional[List[str]] = None,
         membus: Optional[BaseXBar] = None,
