@@ -115,7 +115,6 @@ parser.add_argument(
     "--latency",
     type=int,
     default=25,
-    required=True,
     help="Specify cxl controller round-trip latency in nanoseconds",
 )
 
