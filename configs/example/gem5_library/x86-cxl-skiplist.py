@@ -75,6 +75,15 @@ parser.add_argument(
     "-fs", "--full-system", action="store_true", help="Run in full system mode"
 )
 
+# Use KVM for the boot phase (FS mode only)
+parser.add_argument(
+    "-kvm",
+    "--kvm",
+    action="store_true",
+    help="Use KVM instead of ATOMIC for the boot phase (FS mode only). "
+    "Requires an x86 host with /dev/kvm. Defaults to ATOMIC.",
+)
+
 # Benchmark specific arguments
 parser.add_argument(
     "--num-threads",
@@ -139,6 +148,7 @@ args = parser.parse_args()
 # NOTE: There are going to be 3 strategies: "direct" | "random" | "speed"
 strategy = args.strategy
 FS_MODE = args.full_system
+USE_KVM = args.kvm
 num_threads = args.num_threads
 initial_size = args.initial_size
 keyspace_range = args.range
@@ -203,15 +213,23 @@ else:
 
 # Full system mode setup
 if FS_MODE:
-    # TODO: processor that supports KVM
-    # TODO: can change KVM to ATOMIC
-    # Switchable Processor to run FS mode3
+    # KVM is faster than Atomic
+    if USE_KVM:
+        requires(kvm_required=True)
+    starting_core_type = CPUTypes.KVM if USE_KVM else CPUTypes.ATOMIC
+
+    # Switchable Processor to run FS mode
     processor = SimpleSwitchableProcessor(
-        starting_core_type=CPUTypes.ATOMIC,
+        starting_core_type=starting_core_type,
         switch_core_type=CPUTypes.TIMING,
         isa=ISA.X86,
         num_cores=(int(num_threads) + 1),
     )
+
+    # Disable perf on all KVM cores
+    for core in processor.get_cores():
+        if core.is_kvm_core():
+            core.get_simobject().usePerf = False
 
     # X86 board to run FS mode
     board = X86Board(
