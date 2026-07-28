@@ -26,7 +26,7 @@ from gem5.components.boards.x86_board import X86Board
 from gem5.components.cachehierarchies.classic.no_cache import NoCache
 
 # --- Memory imports ---
-from gem5.components.memory import SingleChannelDDR4_2400
+from gem5.components.memory import SingleChannelDDR5_8400
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.components.processors.simple_switchable_processor import (  # TODO: processor that supports KVM
@@ -117,7 +117,7 @@ random_distr = args.random_distr
 arguments = [num_threads, array_size, num_operations, random_distr]
 
 # A single local DDR4 memory system
-memory = SingleChannelDDR4_2400(size="3GiB")
+memory = SingleChannelDDR5_8400(size="4GiB")
 
 
 # In this setup we don't have a cache. `NoCache` can be used for such setups.
