@@ -4,7 +4,7 @@ This gem5 configuation script creates a simple board to run an X86
 
 This setup is close to the simplest setup possible using the gem5
 library. It does not contain any kind of caching, IO, or any non-essential
-components. It uses a single local DDR4 memory system.
+components. It uses a single local DDR5 memory system.
 
 Usage
 -----
@@ -26,7 +26,7 @@ from gem5.components.boards.x86_board import X86Board
 from gem5.components.cachehierarchies.classic.no_cache import NoCache
 
 # --- Memory imports ---
-from gem5.components.memory import SingleChannelDDR5_8400
+from gem5.components.memory import DIMM_DDR5_8400
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.components.processors.simple_switchable_processor import (  # TODO: processor that supports KVM
@@ -54,7 +54,7 @@ requires(isa_required=ISA.X86)
 
 # Arguments
 parser = argparse.ArgumentParser(
-    description="Configuration script to run the pointer array microbenchmark on a local DDR4 memory system"
+    description="Configuration script to run the pointer array microbenchmark on a local DDR5 memory system"
 )
 
 # Full system mode vs SE mode
@@ -116,8 +116,8 @@ random_distr = args.random_distr
 # Arguments for the binary (pointer array worload)
 arguments = [num_threads, array_size, num_operations, random_distr]
 
-# A single local DDR4 memory system
-memory = SingleChannelDDR5_8400(size="4GiB")
+# A single local DDR5 memory system
+memory = DIMM_DDR5_8400(size="4GiB")
 
 
 # In this setup we don't have a cache. `NoCache` can be used for such setups.
