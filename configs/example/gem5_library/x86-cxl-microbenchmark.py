@@ -18,6 +18,7 @@ scons build/ALL/gem5.opt
 import argparse
 import base64
 import os
+from pathlib import Path
 from socket import gethostname
 
 import m5
@@ -32,22 +33,17 @@ from gem5.components.memory.dram_interfaces.ddr4 import DDR4_2400_8x8
 from gem5.components.memory.dram_interfaces.ddr5 import DDR5_8400_4x8
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_processor import SimpleProcessor
-from gem5.components.processors.simple_switchable_processor import (  # TODO: processor that supports KVM
+from gem5.components.processors.simple_switchable_processor import (
     SimpleSwitchableProcessor,
 )
 from gem5.isas import ISA
-
-# from gem5.resources.resource import BinaryResource, obtain_resource
 from gem5.resources.resource import (
     BinaryResource,
-    obtain_resource,
+    DiskImageResource,
+    KernelResource,
 )
-from gem5.simulate.exit_handler import (
-    WorkBeginExitHandler,
-    WorkEndExitHandler,
-)
+from gem5.simulate.exit_event import ExitEvent
 from gem5.simulate.simulator import Simulator
-from gem5.utils.override import overrides
 from gem5.utils.requires import requires
 
 # TODO: Add more memory (fast, medium, slow)
@@ -55,7 +51,6 @@ from gem5.utils.requires import requires
 
 # This check ensures the gem5 binary contains the X86 ISA target. If not, an
 # exception will be thrown.
-# TODO: require: , kvm_required = True
 requires(isa_required=ISA.X86)
 
 # Arguments
@@ -75,15 +70,6 @@ parser.add_argument(
 # Full system mode vs SE mode
 parser.add_argument(
     "-fs", "--full-system", action="store_true", help="Run in full system mode"
-)
-
-# Use KVM for the boot phase (FS mode only)
-parser.add_argument(
-    "-kvm",
-    "--kvm",
-    action="store_true",
-    help="Use KVM instead of ATOMIC for the boot phase (FS mode only). "
-    "Requires an x86 host with /dev/kvm. Defaults to ATOMIC.",
 )
 
 # Benchmark specific arguments
@@ -148,7 +134,6 @@ args = parser.parse_args()
 # NOTE: There are going to be 3 strategies: "direct" | "random" | "speed"
 strategy = args.strategy
 FS_MODE = args.full_system
-USE_KVM = args.kvm
 num_threads = args.num_threads
 array_size = args.array_size
 num_operations = args.num_operations
@@ -201,25 +186,35 @@ elif "SLURM_JOB_ID" in os.environ or hostname == "sagehen.hpc.pomona.edu":
 else:
     raise Exception("Not one of the configured machines! (pcal|hpc|local mac)")
 
+# Kernel and disk image for FS mode, read straight off the local filesystem.
+#
+# `obtain_resource("...")` is deliberately not used: it queries
+# https://api.gem5.org for the resource metadata *before* it ever looks in the
+# cache, so it needs outbound internet on every run even when the files are
+# already downloaded. HPC compute nodes have none, so every Slurm task died in
+# that call before the board was built. These are the exact paths
+# `obtain_resource` would have cached to, so an existing cache just works.
+#
+# Populate this directory once from a machine with internet: download the
+# kernel and disk image (URLs + md5s in the FS-mode design doc under
+# microtests/docs/), decompress the image, and name both files exactly as
+# below. Or just copy them from another machine's ~/.cache/gem5.
+RESOURCE_DIR = Path(
+    os.environ.get("GEM5_RESOURCE_DIR", Path.home() / ".cache" / "gem5")
+)
+KERNEL_PATH = RESOURCE_DIR / "x86-linux-kernel-5.4.49-1.0.0"
+DISK_IMAGE_PATH = RESOURCE_DIR / "x86-ubuntu-18.04-img-1.0.0"
+
 # Full system mode setup
 if FS_MODE:
-    # KVM mode is faster than Atomic
-    if USE_KVM:
-        requires(kvm_required=True)
-    starting_core_type = CPUTypes.KVM if USE_KVM else CPUTypes.ATOMIC
-
-    # Switchable Processor to run FS mode
+    # Boot on ATOMIC cores (fast, and needs no host support), then switch to
+    # TIMING for the region of interest so the benchmark sees real memory timing.
     processor = SimpleSwitchableProcessor(
-        starting_core_type=starting_core_type,
+        starting_core_type=CPUTypes.ATOMIC,
         switch_core_type=CPUTypes.TIMING,
         isa=ISA.X86,
         num_cores=(int(num_threads) + 1),
     )
-
-    # Disable per for all KVM cores
-    for core in processor.get_cores():
-        if core.is_kvm_core():
-            core.get_simobject().usePerf = False
 
     # X86 board to run FS mode
     board = X86Board(
@@ -240,49 +235,58 @@ if FS_MODE:
     # Encoding for shell script
     payload = base64.b64encode(raw_binary).decode("ascii")
 
-    # Commands to run after boot
-    # Copy over the binary (dynamically updates it) and run it
-    # TODO: try without wrap
+    # Commands to run after boot.
+    # Copy over the binary (dynamically updates it) and run it, bracketed by two
+    # `m5 exit` calls that mark the region of interest. The binary is not m5
+    # annotated, so plain exits are the ROI markers (see roi_exit_generator).
+    # The base64 decode stays on the ATOMIC side of the first marker to keep it fast.
     my_commands = (
         "echo 'Boot complete, updating the binary!'\n"
         "cat << 'B64EOF' | base64 -d > /root/executable\n"
         f"{payload}\n"
         "B64EOF\n"
         "chmod +x /root/executable\n"
+        "m5 exit\n"  # ROI start: switch to TIMING and reset stats
         f"/root/executable {' '.join(arguments)}\n"
-        "m5 exit\n"
+        "m5 exit\n"  # ROI end: dump stats and end the simulation
     )
 
+    # gem5 would report the missing file itself, but a Slurm log is the only
+    # diagnostic these runs leave behind, so say what to do about it.
+    for path in (KERNEL_PATH, DISK_IMAGE_PATH):
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Full-system resource not found: {path}\n"
+                "Copy the (decompressed) kernel and disk image into this "
+                "directory, or point GEM5_RESOURCE_DIR at one that holds "
+                "them. Download URLs are in the FS-mode design doc."
+            )
+
     board.set_kernel_disk_workload(
-        kernel=obtain_resource(resource_id="x86-linux-kernel-5.4.49"),
-        disk_image=obtain_resource(resource_id="x86-ubuntu-18.04-img"),
+        kernel=KernelResource(local_path=str(KERNEL_PATH)),
+        disk_image=DiskImageResource(
+            local_path=str(DISK_IMAGE_PATH), root_partition="1"
+        ),
         readfile_contents=my_commands,  # Bash script that runs after boot
     )
 
     print("Full-System mode")
 
-    # Custom messages
-    class CustomWorkBeginExitHandler(WorkBeginExitHandler):
-        @overrides(WorkBeginExitHandler)
-        def _process(self, simulator: "Simulator") -> None:
-            print("Done booting Linux")
-            print("Resetting stats at the start of ROI!")
-            m5.stats.reset()
-            simulator.switch_processor()
+    # The guest's own gem5_init.sh issues no `m5 exit` before running our script
+    # (it only exits after it returns), so our two markers are exits #1 and #2.
+    # We never reach its trailing exit because marker #2 ends the simulation.
+    def roi_exit_generator():
+        print("Done booting Linux")
+        print("ROI start: switching to TIMING cores and resetting stats")
+        processor.switch()
+        m5.stats.reset()
+        yield False
 
-        @overrides(WorkBeginExitHandler)
-        def _exit_simulation(self) -> bool:
-            return False
+        print("ROI end: dumping stats")
+        m5.stats.dump()
+        yield True
 
-    class CustomWorkEndExitHandler(WorkEndExitHandler):
-        @overrides(WorkEndExitHandler)
-        def _process(self, simulator: "Simulator") -> None:
-            print("Dump stats at the end of the ROI!")
-            m5.stats.dump()
-
-        @overrides(WorkEndExitHandler)
-        def _exit_simulation(self) -> bool:
-            return True
+    on_exit_event = {ExitEvent.EXIT: roi_exit_generator()}
 
 else:
     # SE mode setup
@@ -300,13 +304,16 @@ else:
     binary = BinaryResource(local_path=WORKLOAD_PATH)
     board.set_se_binary_workload(binary=binary, arguments=arguments)
 
+    # SE mode runs on TIMING from the start, so it needs no ROI markers and
+    # keeps gem5's default exit behavior.
+    on_exit_event = None
+
     print("System-call Emulation mode")
 
 
 # Lastly we run the simulation.
-simulator = Simulator(board=board)
+simulator = Simulator(board=board, on_exit_event=on_exit_event)
 
 print("Running the simulation")
-# print("Using KVM cpu")
 
 simulator.run()
