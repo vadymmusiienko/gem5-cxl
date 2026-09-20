@@ -12,20 +12,16 @@
 #include "sim/eventq.hh"
 #include "sim/sim_object.hh"
 
-namespace gem5
-{
-class CXLcontroller : public SimObject
-{
+namespace gem5 {
+class CXLcontroller : public SimObject {
   private:
-    class CpuSidePort : public ResponsePort
-    {
+    class CpuSidePort : public ResponsePort {
       private:
         CXLcontroller *owner;
 
       public:
         CpuSidePort(const std::string &name, CXLcontroller *owner)
-            : ResponsePort(name), owner(owner)
-        {}
+            : ResponsePort(name), owner(owner) {}
         AddrRangeList getAddrRanges() const override;
 
       protected:
@@ -35,15 +31,13 @@ class CXLcontroller : public SimObject
         void recvRespRetry() override;
     };
 
-    class MemSidePort : public RequestPort
-    {
+    class MemSidePort : public RequestPort {
       private:
         CXLcontroller *owner;
 
       public:
         MemSidePort(const std::string &name, CXLcontroller *owner)
-            : RequestPort(name), owner(owner)
-        {}
+            : RequestPort(name), owner(owner) {}
 
       protected:
         bool recvTimingResp(PacketPtr pkt) override;
@@ -107,7 +101,23 @@ class CXLcontroller : public SimObject
 
     // Address mappings
     // std::unordered_map<Addr, Addr> addr_map; // Phys addr -> Device addr
-    Addr *addr_map; // addr_map[phys_addr_idx] = device addr
+    //
+    // addr_map[phys_addr_idx] holds the mapped device address BIASED BY ONE,
+    // so that an all-zero entry means "not yet mapped". The bias exists to let
+    // the array be calloc'd rather than memset.
+    Addr *addr_map;
+
+    bool isMapped(Addr map_idx) const { return addr_map[map_idx] != 0; }
+
+    Addr getMapped(Addr map_idx) const {
+        assert(isMapped(map_idx));
+        return addr_map[map_idx] - 1;
+    }
+
+    void setMapped(Addr map_idx, Addr device_addr) {
+        addr_map[map_idx] = device_addr + 1;
+    }
+
     // Static fragmentation map for "direct" (granule idx -> device addr)
     std::vector<Addr> frag_map;
     std::unordered_map<PacketPtr, PacketPtr>
@@ -124,6 +134,7 @@ class CXLcontroller : public SimObject
     /** constructor
      */
     CXLcontroller(const CXLcontrollerParams &params);
+    ~CXLcontroller();
     Port &getPort(const std::string &if_name,
                   PortID idx = InvalidPortID) override;
     // these functions will do the main work when a packet is received
