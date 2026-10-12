@@ -443,6 +443,8 @@ void CXLcontroller::trySendResp() {
 
 // req_type: "timing" | "functional" | "atomic"
 Tick CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type) {
+    const Addr orig_addr = pkt->getAddr();
+
     // Recreate pkt with the right strategy
     PacketPtr newPkt;
     if (cxl_redirect_strategy == "direct") {
@@ -460,10 +462,13 @@ Tick CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type) {
     if (req_type == "functional") {
         // Functional accesses are for setting memory, thus no latency
         mem_port.sendFunctional(newPkt);
+        newPkt->setAddr(orig_addr);
         return 0;
     } else if (req_type == "atomic") {
         // No events, so return just the added round-trip latency?
-        return mem_port.sendAtomic(newPkt) + latency;
+        Tick atomic_latency = mem_port.sendAtomic(newPkt) + latency;
+        newPkt->setAddr(orig_addr);
+        return atomic_latency;
     } else if (req_type == "timing") {
 
         // Queue the pkt
