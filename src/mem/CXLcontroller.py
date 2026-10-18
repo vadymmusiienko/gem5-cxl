@@ -18,10 +18,13 @@ class CXLcontroller(SimObject):
         "CXL Controller redirect strategy: 'direct' | 'random' | 'speed' ",
     )
 
-    # CXL controller round-trip latency (half applied per direction)
+    # Round-trip latency of the link to each device
+    # Half applied in each direction
+    # Can be same or different per device
     # TODO: make req and res latency separate?
-    cxl_latency = Param.Latency(
-        "CXL controller round-trip latency (half applied in each direction)"
+    cxl_latency = VectorParam.Latency(
+        "Round-trip link latency of each device, one per device_ranges "
+        "(half applied in each direction)"
     )
 
     # Fragmentation params ('direct' strategy only)

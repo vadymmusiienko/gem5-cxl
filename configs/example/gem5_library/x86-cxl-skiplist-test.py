@@ -98,18 +98,24 @@ parser.add_argument(
     choices=["random", "mirakuru", "speed"],
 )
 
-# DEVICE_SIZES in tests/SkipListTest.cc must match this list.
-sizes = ["180MiB", "52MiB", "130MiB"]
-memory = [DDR5_8400_4x8(), DDR4_2400_8x8(), DDR3_1600_8x8()]  # NOTE: Remote memory
-# memory = [DDR5_8400_4x8(), DDR5_8400_4x8(), DDR5_8400_4x8()] # NOTE: Local memory
+# Round-trip link latency to each device, in nanoseconds, fastest first
+# This separates memory tiers (instead of DDR5/4/3)
+parser.add_argument(
+    "--device-latency",
+    type=int,
+    nargs=3,
+    default=[100, 200, 400],  # TODO: Play with these values
+    metavar=("DEV0", "DEV1", "DEV2"),
+    help="round-trip link latency of each device in ns, fastest first",
+)
 
-cxl_mem = CXLmemory(
-    memory=memory,
-    sizes=sizes,
-    strategy="speed",
-    frag_perc=0,
-    frag_seed=47,
-    cxl_latency=25,  # NOTE: Set to 0 for local memory, 25 for remote
+# Which DRAM sits behind each device.
+parser.add_argument(
+    "--dram",
+    default="uniform",
+    choices=["uniform", "mixed"],
+    help="uniform: the same part everywhere, so the tiers differ by link "
+    "latency alone. mixed: DDR5/DDR4/DDR3, which differ in bandwidth",
 )
 
 # For some reason we need extra cores (more cores than threads)
@@ -121,6 +127,38 @@ parser.add_argument(
     help="cores beyond --threads, for the main thread and the kernel",
 )
 args = parser.parse_args()
+
+# The first three are the devices the guest claims, and DEVICE_SIZES in
+# tests/SkipListTest.cc must match them: 180, 52 and 50 + 80 = 130 MiB
+#
+# The fourth is GUEST_MARGIN, which the guest deliberately leaves unclaimed for the OS, the zipf table, etc.
+sizes = ["180MiB", "52MiB", "50MiB", "80MiB"]
+
+# "uniform" - differ by link latency alone
+# "mixed" - differ by link latency and device type
+if args.dram == "mixed":
+    memory = [
+        DDR5_8400_4x8(),
+        DDR4_2400_8x8(),
+        DDR3_1600_8x8(),
+        DDR3_1600_8x8(),
+    ]
+else:
+    memory = [DDR4_2400_8x8() for _ in sizes]  # "uniform" ddr4 devices
+
+# The margin is the program's own heap, so imitate local mem by 0 latency
+latencies = list(args.device_latency) + [0]  # Different link latencies
+# latencies = [25, 25, 25, 25] # NOTE: What I had before
+
+cxl_mem = CXLmemory(
+    memory=memory,
+    sizes=sizes,
+    strategy="speed",
+    frag_perc=0,
+    frag_seed=47,
+    cxl_latency=latencies,
+)
+
 
 processor = SimpleSwitchableProcessor(
     starting_core_type=CPUTypes.ATOMIC,
@@ -229,6 +267,6 @@ print(
     f"seed {args.seed}, keys {args.key_dist}"
     f"{f' alpha {args.zipf_alpha}' if args.key_dist == 'zipfian' else ''}"
     f"{' unscrambled' if args.no_scramble else ''}, cache {args.cache}, "
-    f"sizes {sizes}"
+    f"sizes {sizes}, dram {args.dram}, link latency {args.device_latency} ns"
 )
 simulator.run()

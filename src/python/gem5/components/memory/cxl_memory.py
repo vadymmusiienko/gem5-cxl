@@ -42,6 +42,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 
 from m5.objects import (
@@ -97,7 +98,7 @@ class CXLmemory(AbstractMemorySystem):
         frag_perc: int = 0,
         frag_seed: int = 47,
         # TODO: This number is in nanoseconds (Change the default?)
-        cxl_latency: int = 25,
+        cxl_latency: Union[int, List[int]] = 25,
     ) -> None:
         """
         :param strategy: One of the 3 strategies: "direct", "random", "speed". Defaults to "direct".
@@ -106,7 +107,7 @@ class CXLmemory(AbstractMemorySystem):
         :param memory: A list of memory interfaces for the cxl memory pool.
         :param frag_perc: Percentage of granules to shuffle for the "direct" strategy fragmentation. Defaults to 0 (no fragmentation).
         :param frag_seed: Seed for the fragmentation shuffle. Defaults to 47.
-        :param cxl_latency: Round-trip latency of the cxl controller in nanoseconds
+        :param cxl_latency: Round-trip link latency in nanoseconds for each device.
         """
         super().__init__()
 
@@ -116,7 +117,6 @@ class CXLmemory(AbstractMemorySystem):
         # Fragmentation params ("direct" strategy only)
         self._frag_perc = frag_perc
         self._frag_seed = frag_seed
-        self._cxl_latency = f"{cxl_latency}ns"  # Convert int to str with nanosec
 
         # Memory interfaces
         self.membus = membus if membus else self._get_default_membus()
@@ -129,6 +129,20 @@ class CXLmemory(AbstractMemorySystem):
         # CXL Memory pool devices
         self._dram = memory if memory else self._get_default_memory(sizes[0])
         assert len(memory) == len(sizes)  # Sanity check
+
+        # One link latency per device. A single number means every device is
+        # the same distance away, which is what a homogeneous pool wants.
+        if isinstance(cxl_latency, (list, tuple)):
+            latencies = list(cxl_latency)
+        else:
+            latencies = [cxl_latency] * len(self._sizes)
+        if len(latencies) != len(self._sizes):
+            raise Exception(
+                f"CXL memory: {len(latencies)} link latencies were given for "
+                f"{len(self._sizes)} devices. Give one per device, or one "
+                "number for all of them."
+            )
+        self._cxl_latency = [f"{n}ns" for n in latencies]
 
         # Memory controller (Actually manages memory)
         self.mem_ctrls = [MemCtrl(dram=dram) for dram in self._dram]

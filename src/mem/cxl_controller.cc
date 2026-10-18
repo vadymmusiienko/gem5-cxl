@@ -16,7 +16,7 @@ CXLcontroller::CXLcontroller(const CXLcontrollerParams &params)
       mem_port(params.name + ".mem_port", this),
       device_addr_ranges(params.device_ranges),
       cxl_redirect_strategy(params.cxl_strategy), frag_perc(params.frag_perc),
-      frag_seed(params.frag_seed), latency(params.cxl_latency),
+      frag_seed(params.frag_seed), device_latency(params.cxl_latency),
       req_waiting_retry(false), resp_waiting_retry(false),
       send_req_event([this] { trySendReq(); }, name() + ".sendReqEvent"),
       send_resp_event([this] { trySendResp(); }, name() + ".sendRespEvent"),
@@ -24,6 +24,11 @@ CXLcontroller::CXLcontroller(const CXLcontrollerParams &params)
       device_next_block(), // Next free block of every device
       speed_device_idx(0)  // The index of the fastest device (0 by default)
 {
+    fatal_if(device_latency.size() != device_addr_ranges.size(),
+             "cxl_latency has %d entries but there are %d device ranges; "
+             "every device needs its own link latency",
+             device_latency.size(), device_addr_ranges.size());
+
     // Initialize next block of each device to the start of its range
     Addr total_size = 0;
     for (int i = 0; i < device_addr_ranges.size(); i++) {
@@ -129,6 +134,20 @@ Port &CXLcontroller::getPort(const std::string &if_name, PortID idx) {
         // pass it along to our super class
         return SimObject::getPort(if_name, idx);
     }
+}
+
+// Which device serves this device-side address
+//
+// Takes an address on the memory side, not the cpu side: a request's address
+// after the strategy has remapped it, or the address a response comes back
+// on. Both identify the link whose latency applies.
+int CXLcontroller::deviceFor(Addr device_addr) const {
+    for (int i = 0; i < device_addr_ranges.size(); i++) {
+        if (device_addr_ranges[i].contains(device_addr)) {
+            return i;
+        }
+    }
+    panic("Device address %#x is not in any device range", device_addr);
 }
 
 // NOTE: This function handles the I/O hole in X86board
@@ -458,6 +477,10 @@ Tick CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type) {
               "'random' | 'speed'");
     }
 
+    // Which link this packet travels over (link latency)
+    // Only known after the remap, because the remap is what picks the device
+    const Tick link = device_latency[deviceFor(newPkt->getAddr())];
+
     // Handle different request types
     if (req_type == "functional") {
         // Functional accesses are for setting memory, thus no latency
@@ -466,7 +489,7 @@ Tick CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type) {
         return 0;
     } else if (req_type == "atomic") {
         // No events, so return just the added round-trip latency?
-        Tick atomic_latency = mem_port.sendAtomic(newPkt) + latency;
+        Tick atomic_latency = mem_port.sendAtomic(newPkt) + link;
         newPkt->setAddr(orig_addr);
         return atomic_latency;
     } else if (req_type == "timing") {
@@ -474,7 +497,7 @@ Tick CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type) {
         // Queue the pkt
         // It will leave the controller at the "ready" tick
         // (one direction = half the round-trip latency)
-        Tick ready_at = curTick() + latency / 2;
+        Tick ready_at = curTick() + link / 2;
         req_queue.emplace_back(ready_at, newPkt);
         if (!send_req_event.scheduled() && !req_waiting_retry) {
             schedule(send_req_event, ready_at);
@@ -488,6 +511,10 @@ Tick CXLcontroller::handleRequest(PacketPtr pkt, std::string req_type) {
 }
 
 bool CXLcontroller::handleResponse(PacketPtr pkt) {
+    // Link latency for a returning packet
+    // Check before remapping back
+    const Tick link = device_latency[deviceFor(pkt->getAddr())];
+
     PacketPtr newPkt;
     if (cxl_redirect_strategy == "direct") {
         newPkt = handleDirect(pkt, false, false);
@@ -500,9 +527,9 @@ bool CXLcontroller::handleResponse(PacketPtr pkt) {
               "'random' | 'speed'");
     }
 
-    // Queue the pkt for the cpu; it may leave the controller once the
-    // latency has elapsed (one direction = half the round-trip latency)
-    Tick ready_at = curTick() + latency / 2;
+    // Queue the pkt for the cpu
+    // It will leave the controller once the latency has elapsed
+    Tick ready_at = curTick() + link / 2;
     resp_queue.emplace_back(ready_at, newPkt);
     if (!send_resp_event.scheduled() && !resp_waiting_retry) {
         schedule(send_resp_event, ready_at);

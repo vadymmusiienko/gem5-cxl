@@ -62,9 +62,9 @@ class CXLcontroller : public SimObject {
     int frag_perc;      // % of granules to shuffle ("direct" only, 0 = off)
     uint64_t frag_seed; // Seed for the fragmentation shuffle
 
-    // CXL controller round-trip latency
-    // (half is applied per direction: latency / 2)
-    const Tick latency;
+    // Round-trip latency of the link to each device, indexed like
+    // device_addr_ranges (half is applied per direction: latency / 2)
+    const std::vector<Tick> device_latency;
 
     // Timing packets to be sent -- needed for latency (event scheduling)
     // Also works as blocked packets queue
@@ -88,6 +88,10 @@ class CXLcontroller : public SimObject {
     PacketPtr handleSpeed(PacketPtr pkt, bool from_cpu, bool isTiming);
     PacketPtr remapPacket(PacketPtr pkt, Addr new_addr, bool isTiming);
     void updateOldPacket(PacketPtr oldPkt, PacketPtr newPkt);
+
+    // Which device serves this device-side address, for picking its link
+    // latency. Panics if the address belongs to no device.
+    int deviceFor(Addr device_addr) const;
 
     // Map a granularity-aligned physical address to an addr map idx
     // NOTE: (Collapses I/O gap for x86 board)
