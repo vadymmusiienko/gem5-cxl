@@ -45,11 +45,12 @@ requires(isa_required=ISA.X86)
 parser = argparse.ArgumentParser(description="Skip list on CXL device memory")
 parser.add_argument("--threads", type=int, default=4)
 
-# NOTE: Use operations mode
+# "operations" gives every policy the same work and measures the time
+# "time" gives every policy the same time and measures the work
 parser.add_argument(
     "--mode",
     default="operations",
-    choices=["operations", "header"],
+    choices=["operations", "time", "header"],
 )
 parser.add_argument("--ins", type=int, default=25, help="insert percent")
 parser.add_argument("--rem", type=int, default=25, help="remove percent")
@@ -86,7 +87,7 @@ parser.add_argument(
     "--cache",
     default="none",
     choices=["none", "l1"],
-    help="cache hierarchy: no caches, or L1I+L1D",
+    help="cache hierarchy: no caches, L1I",
 )
 parser.add_argument("--l1i-size", default="32KiB")
 parser.add_argument("--l1d-size", default="512B")
@@ -181,6 +182,7 @@ board = X86Board(
     cache_hierarchy=cache_hierarchy,
 )
 
+# Get the binary path (depends on a machine where I'm running this)
 hostname = gethostname()
 if hostname.startswith("Vadym"):
     BIN_DIR = "/Users/vadymmusiienko/Work/Research/microtests/bin"
@@ -194,9 +196,9 @@ else:
 
 WORKLOAD_PATH = os.path.join(BIN_DIR, "SkipListTest")
 
-# Same cache layout obtain_resource() would have used, so an already
-# populated ~/.cache/gem5 just works. Explicit paths because the cluster has
-# no internet to download from.
+# Same cache layout obtain_resource() would have used
+# so an already populated ~/.cache/gem5 just works
+# Explicit paths because the cluster has no internet to download from
 RESOURCE_DIR = os.environ.get("GEM5_RESOURCE_DIR", os.path.expanduser("~/.cache/gem5"))
 KERNEL_PATH = os.path.join(RESOURCE_DIR, "x86-linux-kernel-5.4.49-1.0.0")
 DISK_IMAGE_PATH = os.path.join(RESOURCE_DIR, "x86-ubuntu-18.04-img-1.0.0")
@@ -206,6 +208,7 @@ for path in (KERNEL_PATH, DISK_IMAGE_PATH):
         print(f"Full-system resource not found: {path}")
         assert False
 
+# READ IN THE BINARY
 with open(WORKLOAD_PATH, "rb") as f:
     payload = base64.b64encode(f.read()).decode("ascii")
 
@@ -219,6 +222,7 @@ GUEST_ARGS = (
     f"{' --no-scramble' if args.no_scramble else ''}"
 )
 
+# Execute any commands on the disk image
 my_commands = (
     "echo 'Boot complete, updating the binary!'\n"
     "cat << 'B64EOF' | base64 -d > /root/executable\n"
@@ -228,7 +232,7 @@ my_commands = (
     # No marker here. Both ROI markers come from inside the binary now, so
     # that boot, the device claim and the whole preload stay on the ATOMIC
     # cores. The binary switches to TIMING only once every worker has
-    # finished preloading, and exits again after it writes its CSV row.
+    # finished preloading, and exits again after it writes its CSV row
     f"/root/executable {GUEST_ARGS}\n"
     'echo "skiplist exit $?"\n'
     "m5 exit\n"  # safety net if the binary dies before its own ROI-end exit
