@@ -26,10 +26,11 @@ from gem5.components.cachehierarchies.classic.no_cache import NoCache
 from gem5.components.cachehierarchies.classic.private_l1_cache_hierarchy import (
     PrivateL1CacheHierarchy,
 )
+from gem5.components.cachehierarchies.classic.private_l1_private_l2_cache_hierarchy import (
+    PrivateL1PrivateL2CacheHierarchy,
+)
 from gem5.components.memory.cxl_memory import CXLmemory
-from gem5.components.memory.dram_interfaces.ddr3 import DDR3_1600_8x8
 from gem5.components.memory.dram_interfaces.ddr4 import DDR4_2400_8x8
-from gem5.components.memory.dram_interfaces.ddr5 import DDR5_8400_4x8
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_switchable_processor import (
     SimpleSwitchableProcessor,
@@ -39,6 +40,7 @@ from gem5.resources.resource import DiskImageResource, KernelResource
 from gem5.simulate.exit_event import ExitEvent
 from gem5.simulate.simulator import Simulator
 from gem5.utils.requires import requires
+from m5.objects import SimpleMemory
 
 requires(isa_required=ISA.X86)
 
@@ -82,15 +84,17 @@ parser.add_argument(
     help="leave zipf hot keys contiguous at the bottom of the keyspace",
 )
 
-# What to cache.
+# What to cache. Sizes default per hierarchy, see below.
 parser.add_argument(
     "--cache",
     default="none",
-    choices=["none", "l1"],
-    help="cache hierarchy: no caches, L1I",
+    choices=["none", "l1", "l1l2"],
+    help="none: every access reaches the pool. l1: tiny L1D on purpose, so "
+    "the pool is still what is measured. l1l2: a realistic core",
 )
-parser.add_argument("--l1i-size", default="32KiB")
-parser.add_argument("--l1d-size", default="512B")
+parser.add_argument("--l1i-size", default=None)
+parser.add_argument("--l1d-size", default=None)
+parser.add_argument("--l2-size", default=None)
 
 # Which device the allocator puts each object on. See DevicePolicy.hh.
 parser.add_argument(
@@ -99,24 +103,54 @@ parser.add_argument(
     choices=["random", "mirakuru", "speed"],
 )
 
-# Round-trip link latency to each device, in nanoseconds, fastest first
-# This separates memory tiers (instead of DDR5/4/3)
+# What the pool is made of.
+# "simple" makes every device a SimpleMemory
+# "ddr4" puts the same DDR4 part behind every device
+parser.add_argument(
+    "--mem",
+    default="simple",
+    choices=["simple", "ddr4"],
+    help="simple: SimpleMemory per device, tiered by --device-latency. "
+    "ddr4: the same DDR4 part everywhere",
+)
+
+# Device access latency, in ns, fastest first
+# "simple" only
 parser.add_argument(
     "--device-latency",
     type=int,
     nargs=3,
-    default=[100, 200, 400],  # TODO: Play with these values
+    default=[100, 200, 400],
     metavar=("DEV0", "DEV1", "DEV2"),
-    help="round-trip link latency of each device in ns, fastest first",
+    help="SimpleMemory access latency of each pool device in ns, fastest first",
 )
 
-# Which DRAM sits behind each device.
+# The margin is the program's own heap and the zipf tables, not part of the
+# pool, so it gets a local-DRAM latency rather than a tier latency.
 parser.add_argument(
-    "--dram",
-    default="uniform",
-    choices=["uniform", "mixed"],
-    help="uniform: the same part everywhere, so the tiers differ by link "
-    "latency alone. mixed: DDR5/DDR4/DDR3, which differ in bandwidth",
+    "--margin-latency",
+    type=int,
+    default=30,
+    help="SimpleMemory access latency of the margin device in ns",
+)
+
+# Per-device bandwidth cap. Raise it to isolate pure latency effects, lower
+# it to make a policy pay for concentrating its reads on one device.
+parser.add_argument(
+    "--device-bandwidth",
+    default="12.8GiB/s",
+    help="SimpleMemory bandwidth per device",
+)
+
+# Round-trip link latency, in ns. One value applies to every device, which
+# is what a pool behind a single link looks like.
+parser.add_argument(
+    "--cxl-latency",
+    type=int,
+    nargs="+",
+    default=[25],
+    help="round-trip CXL link latency in ns: one value for all devices, or "
+    "one per device",
 )
 
 # For some reason we need extra cores (more cores than threads)
@@ -135,21 +169,21 @@ args = parser.parse_args()
 # The fourth is GUEST_MARGIN, which the guest deliberately leaves unclaimed for the OS, the zipf table, etc.
 sizes = ["180MiB", "52MiB", "50MiB", "80MiB"]
 
-# "uniform" - differ by link latency alone
-# "mixed" - differ by link latency and device type
-if args.dram == "mixed":
+# One latency per device, the margin last
+device_latencies = list(args.device_latency) + [args.margin_latency]
+
+if args.mem == "simple":
     memory = [
-        DDR5_8400_4x8(),
-        DDR4_2400_8x8(),
-        DDR3_1600_8x8(),
-        DDR3_1600_8x8(),
+        SimpleMemory(latency=f"{ns}ns", bandwidth=args.device_bandwidth)
+        for ns in device_latencies
     ]
 else:
-    memory = [DDR4_2400_8x8() for _ in sizes]  # "uniform" ddr4 devices
+    memory = [DDR4_2400_8x8() for _ in sizes]
 
-# The margin is the program's own heap, so imitate local mem by 0 latency
-latencies = list(args.device_latency) + [0]  # Different link latencies
-# latencies = [25, 25, 25, 25] # NOTE: What I had before
+# One link latency for every device unless one per device was given
+link_latencies = (
+    args.cxl_latency * len(sizes) if len(args.cxl_latency) == 1 else args.cxl_latency
+)
 
 cxl_mem = CXLmemory(
     memory=memory,
@@ -157,7 +191,7 @@ cxl_mem = CXLmemory(
     strategy="speed",
     frag_perc=0,
     frag_seed=47,
-    cxl_latency=latencies,
+    cxl_latency=link_latencies,
 )
 
 
@@ -168,9 +202,20 @@ processor = SimpleSwitchableProcessor(
     num_cores=args.threads + args.extra_cores,
 )
 
+# "l1" keeps a deliberately tiny L1D so that almost every node access still
+# reaches the pool and the placement policy is what the run measures.
+#
+# "l1l2" is a realistic core instead: 32 KiB L1s and a 512 KiB private L2,
 if args.cache == "l1":
     cache_hierarchy = PrivateL1CacheHierarchy(
-        l1i_size=args.l1i_size, l1d_size=args.l1d_size
+        l1i_size=args.l1i_size or "32KiB",
+        l1d_size=args.l1d_size or "512B",
+    )
+elif args.cache == "l1l2":
+    cache_hierarchy = PrivateL1PrivateL2CacheHierarchy(
+        l1i_size=args.l1i_size or "32KiB",
+        l1d_size=args.l1d_size or "32KiB",
+        l2_size=args.l2_size or "512KiB",
     )
 else:
     cache_hierarchy = NoCache()
@@ -271,6 +316,7 @@ print(
     f"seed {args.seed}, keys {args.key_dist}"
     f"{f' alpha {args.zipf_alpha}' if args.key_dist == 'zipfian' else ''}"
     f"{' unscrambled' if args.no_scramble else ''}, cache {args.cache}, "
-    f"sizes {sizes}, dram {args.dram}, link latency {args.device_latency} ns"
+    f"sizes {sizes}, mem {args.mem}, "
+    f"device latency {device_latencies} ns, link latency {link_latencies} ns"
 )
 simulator.run()
