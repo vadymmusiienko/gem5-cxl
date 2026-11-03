@@ -17,6 +17,7 @@ the column names.
 import argparse
 import base64
 import os
+import shlex
 import sys
 from socket import gethostname
 
@@ -162,6 +163,17 @@ parser.add_argument(
     help="cores beyond --threads, for the main thread and the kernel",
 )
 args = parser.parse_args()
+
+# gem5 keeps no copy of its own argv in m5out, so write the command down
+# /proc has the real one, elsewhere (macOS) rebuild an equivalent command
+try:
+    with open("/proc/self/cmdline") as f:
+        argv = f.read().rstrip("\0").split("\0")
+except OSError:
+    argv = [sys.executable, f"--outdir={m5.options.outdir}"] + sys.argv
+
+with open(os.path.join(m5.options.outdir, "command.txt"), "w") as f:
+    f.write(" ".join(shlex.quote(a) for a in argv) + "\n")
 
 # The first three are the devices the guest claims, and DEVICE_SIZES in
 # tests/SkipListTest.cc must match them: 180, 52 and 50 + 80 = 130 MiB
