@@ -104,7 +104,9 @@ class CXLmemory(AbstractMemorySystem):
         :param strategy: One of the 3 strategies: "direct", "random", "speed". Defaults to "direct".
         :param sizes: The sizes of every memory device. Defaults to 1 size of "512MB"
         :param membus: The memory bus. This parameter is optional and will default to a 64 bit width SystemXBar if not specified.
-        :param memory: A list of memory interfaces for the cxl memory pool.
+        :param memory: A list of memory devices for the cxl memory pool.
+            Either timing interfaces (DRAMInterface, NVMInterface) or
+            SimpleMemory, which models a device as a flat latency.
         :param frag_perc: Percentage of granules to shuffle for the "direct" strategy fragmentation. Defaults to 0 (no fragmentation).
         :param frag_seed: Seed for the fragmentation shuffle. Defaults to 47.
         :param cxl_latency: Round-trip link latency in nanoseconds for each device.
@@ -145,7 +147,9 @@ class CXLmemory(AbstractMemorySystem):
         self._cxl_latency = [f"{n}ns" for n in latencies]
 
         # Memory controller (Actually manages memory)
-        self.mem_ctrls = [MemCtrl(dram=dram) for dram in self._dram]
+        #
+        # controller() is gem5's own factory
+        self.mem_ctrls = [mem.controller() for mem in self._dram]
 
         # My custom cxl controller
         self.cxl_ctrl = CXLcontroller()
