@@ -60,7 +60,7 @@ parser.add_argument(
 parser.add_argument("--ins", type=int, default=25, help="insert percent")
 parser.add_argument("--rem", type=int, default=25, help="remove percent")
 parser.add_argument("--con", type=int, default=50, help="contains percent")
-parser.add_argument("--preload", type=int, default=32000)
+parser.add_argument("--preload", type=int, default=500000)
 parser.add_argument("--element-space", type=int, default=1000000)
 parser.add_argument("--ops", type=int, default=20000, help="operations per thread")
 parser.add_argument("--seconds", type=int, default=10, help="only used by time modes")
