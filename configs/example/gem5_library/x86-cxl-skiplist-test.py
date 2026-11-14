@@ -31,7 +31,9 @@ from gem5.components.cachehierarchies.classic.private_l1_private_l2_cache_hierar
     PrivateL1PrivateL2CacheHierarchy,
 )
 from gem5.components.memory.cxl_memory import CXLmemory
+from gem5.components.memory.dram_interfaces.ddr3 import DDR3_1600_8x8
 from gem5.components.memory.dram_interfaces.ddr4 import DDR4_2400_8x8
+from gem5.components.memory.dram_interfaces.ddr6 import DDR6_3600_8x8
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.processors.simple_switchable_processor import (
     SimpleSwitchableProcessor,
@@ -107,12 +109,26 @@ parser.add_argument(
 # What the pool is made of.
 # "simple" makes every device a SimpleMemory
 # "ddr4" puts the same DDR4 part behind every device
+# "ddr346" tiers real DRAM parts: DDR6, DDR4, DDR3, and DDR6 for the margin
 parser.add_argument(
     "--mem",
     default="simple",
-    choices=["simple", "ddr4"],
+    choices=["simple", "ddr4", "ddr346"],
     help="simple: SimpleMemory per device, tiered by --device-latency. "
-    "ddr4: the same DDR4 part everywhere",
+    "ddr4: the same DDR4 part everywhere. "
+    "ddr346: DDR6, DDR4 and DDR3 pool devices, DDR6 margin",
+)
+
+# Make one group of DDR6 parameters as good as it can be, on every DDR6
+# device (dev0 and the margin), to see how much of the latency it causes.
+# "ddr346" only. Give both names to idealise both groups at once.
+parser.add_argument(
+    "--ddr6-ideal",
+    nargs="+",
+    default=[],
+    choices=["row-miss", "parallelism"],
+    help="row-miss: tRCD, tRP and tRAS cut to one clock. "
+    "parallelism: every bank its own bank group, 16 ranks instead of 2",
 )
 
 # Device access latency, in ns, fastest first
@@ -164,6 +180,9 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+if args.ddr6_ideal and args.mem != "ddr346":
+    parser.error("--ddr6-ideal needs --mem ddr346, the only pool with DDR6")
+
 # gem5 keeps no copy of its own argv in m5out, so write the command down
 # /proc has the real one, elsewhere (macOS) rebuild an equivalent command
 try:
@@ -189,8 +208,35 @@ if args.mem == "simple":
         SimpleMemory(latency=f"{ns}ns", bandwidth=args.device_bandwidth)
         for ns in device_latencies
     ]
-else:
+elif args.mem == "ddr4":
     memory = [DDR4_2400_8x8() for _ in sizes]
+else:
+    memory = [DDR6_3600_8x8(), DDR4_2400_8x8(), DDR3_1600_8x8(), DDR6_3600_8x8()]
+
+
+# What "as good as it can be" means for each --ddr6-ideal group
+def idealise(dram, group):
+    if group == "row-miss":
+        # A row miss pays tRP (close the old row) and tRCD (open the new
+        # one), and a row must stay open tRAS before it may close. One clock
+        # is the shortest any DRAM command can take.
+        dram.tRCD = dram.tCK
+        dram.tRP = dram.tCK
+        dram.tRAS = dram.tCK
+    elif group == "parallelism":
+        # banks_per_rank stays at 32: gem5's FR-FCFS scheduler tracks banks
+        # in a 32-bit mask per rank, so more would silently break it.
+        # One bank per bank group removes every same-group delay (tCCD_L,
+        # tRRD_L) between different banks, and 16 ranks give 512 banks for
+        # 8 threads, so two reads almost never want the same bank.
+        dram.bank_groups_per_rank = dram.banks_per_rank
+        dram.ranks_per_channel = 16
+
+
+for dram in memory:
+    if isinstance(dram, DDR6_3600_8x8):
+        for group in args.ddr6_ideal:
+            idealise(dram, group)
 
 # One link latency for every device unless one per device was given
 link_latencies = (
@@ -328,7 +374,8 @@ print(
     f"seed {args.seed}, keys {args.key_dist}"
     f"{f' alpha {args.zipf_alpha}' if args.key_dist == 'zipfian' else ''}"
     f"{' unscrambled' if args.no_scramble else ''}, cache {args.cache}, "
-    f"sizes {sizes}, mem {args.mem}, "
+    f"sizes {sizes}, mem {args.mem}"
+    f"{f' ddr6 ideal {args.ddr6_ideal}' if args.ddr6_ideal else ''}, "
     f"device latency {device_latencies} ns, link latency {link_latencies} ns"
 )
 simulator.run()
